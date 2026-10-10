@@ -1,4 +1,5 @@
 import json
+import pytest
 from pathlib import Path
 import re
 import tempfile
@@ -361,8 +362,8 @@ def test_hmx_vtcm_gemm_composes_from_three_operand_buffers():
     ):
         assert call in source
     assert "tl_hexagon_hmx_gemm" not in source
-    assert "A_hmx[((inst_m_idx * 2048) + (k_inner * 1024))]" in source
-    assert "B_hmx[((inst_n_idx * 2048) + (k_inner * 1024))]" in source
+    assert "A_hmx[(inst_m_idx * 2048)]" in source
+    assert "B_hmx[(inst_n_idx * 2048)]" in source
     assert "C_hmx[((inst_m_idx * 2048) + (inst_n_idx * 1024))]" in source
     assert "tl_hexagon_hmx_commit_output_atom" not in source
 
@@ -409,8 +410,8 @@ def test_t_gemm_lowers_to_native_hmx_layout_and_atoms():
     ):
         assert call in source
     assert "tl_hexagon_hmx_gemm" not in source
-    assert "A_hmx)[((inst_m_idx * 2048) + (k_inner * 1024))]" in source
-    assert "B_hmx)[((inst_n_idx * 2048) + (k_inner * 1024))]" in source
+    assert "A_hmx)[(inst_m_idx * 2048)]" in source
+    assert "B_hmx)[(inst_n_idx * 2048)]" in source
     assert "C_hmx)[((inst_m_idx * 2048) + (inst_n_idx * 1024))]" in source
     assert "output_atom" not in source
     assert "tl_hexagon_hmx_commit_output_atom" not in source
@@ -436,8 +437,8 @@ def test_t_gemm_transposed_operands_use_composed_native_layouts():
     transposed_a = _lower_source(_make_t_gemm_probe(transpose_a=True))
     transposed_b = _lower_source(_make_t_gemm_probe(transpose_b=True))
 
-    assert "A_hmx)[((inst_m_idx * 2048) + (k_inner * 1024))]" in transposed_a
-    assert "B_hmx)[((inst_n_idx * 2048) + (k_inner * 1024))]" in transposed_b
+    assert "A_hmx)[(inst_m_idx * 2048)]" in transposed_a
+    assert "B_hmx)[(inst_n_idx * 2048)]" in transposed_b
     assert "(&(((half*)A_hmx)[0])), (&(A[0])), 64, 64, 64, 1, 2)" in transposed_a
     assert "(&(((half*)B_hmx)[0])), (&(B[0])), 64, 64, 64, 1, 3)" in transposed_b
     for source in (transposed_a, transposed_b):
@@ -680,3 +681,60 @@ def test_hmx_staged_q4_codegen_contract():
     assert manifest["vtcm"]["dequant_bytes"] == 256 * 2048 * 2
     assert manifest["vtcm"]["raw_weight_stages"] == 2
     assert all(entry in source for entry in manifest["entries"].values())
+
+
+@pytest.mark.parametrize("tiles", [1, 31, 32, 33, 64, 65])
+def test_hmx_deep_chunk_bounds_and_native_offsets(tiles):
+    emitter = HMXIntrinEmitter(32, 32, tiles * 32, b_transposed=True)
+
+    @T.prim_func
+    def probe(A: T.Tensor((32, tiles * 32), "float16"),
+              B: T.Tensor((32, tiles * 32), "float16")):
+        with T.Kernel(1, threads=1):
+            acc = T.alloc_hmx_accumulator()
+            T.annotate_layout({A: emitter.activation_layout(A),
+                               B: emitter.weight_layout(B)})
+            emitter.acquire(acc)
+            emitter.clear(acc)
+            emitter.mma_tile(acc, A, B)
+            emitter.release(acc)
+
+    target = determine_target("hexagon", return_object=True)
+    with target:
+        artifact = tilelang.lower(probe, target=target, enable_host_codegen=False,
+                                  enable_device_compile=False)
+    source = str(artifact.kernel_source)
+    call = next(line for line in source.splitlines() if "tl_hexagon_hmx_mma_atom(" in line)
+    if tiles <= 32:
+        assert "A[0]" in call and "B[0]" in call
+    else:
+        assert "k_chunk * 32768" in call
+        assert f"k_chunk < {(tiles + 31) // 32}" in source
+
+    calls = []
+    def collect(node):
+        if isinstance(node, tvm.tirx.Call) and node.op == tvm.ir.Op.get("tl.hexagon_hmx_mma"):
+            calls.append(node)
+    for func in artifact.device_mod.functions.values():
+        tvm.tirx.stmt_functor.post_order_visit(func.body, collect)
+    assert len(calls) == 1
+    mma = calls[0]
+    analyzer = tvm.arith.Analyzer()
+    for chunk in range((tiles + 31) // 32):
+        expected = min(tiles - chunk * 32, 32)
+        for expr, value in [(mma.args[3], expected),
+                            (mma.args[1].args[3], expected * 1024),
+                            (mma.args[2].args[3], expected * 1024)]:
+            variables = []
+            tvm.tirx.stmt_functor.post_order_visit(
+                expr, lambda node: variables.append(node) if isinstance(node, tvm.tirx.Var) else None)
+            assert all(var.name == "k_chunk" for var in variables)
+            evaluated = tvm.tirx.stmt_functor.substitute(expr, {var: chunk for var in variables})
+            assert int(analyzer.simplify(evaluated)) == value
+
+
+
+@pytest.mark.parametrize("count", [0, -1, 33])
+def test_hmx_deep_rejects_invalid_constant_count(count):
+    with pytest.raises(ValueError, match="num_tiles"):
+        T.hexagon_hmx_mma(0, 0, 0, count)

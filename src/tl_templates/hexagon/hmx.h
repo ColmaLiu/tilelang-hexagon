@@ -151,15 +151,13 @@ TL_HMX_INLINE void tl_hmx_fill_unit_scales(uint32_t *s) {
 }
 TL_HMX_INLINE void tl_hmx_mac_tiles(const __fp16 *a, const __fp16 *w,
                                     size_t n) {
-  for (size_t i = 0; i < n; ++i) {
-    const __fp16 *activation = a + i * TL_HMX_TILE_ELMS;
-    const __fp16 *weight = w + i * TL_HMX_TILE_ELMS;
-    asm volatile("{ activation.hf = mxmem(%0, %1)\n"
-                 "  weight.hf     = mxmem(%2, %3) }\n" ::"r"(activation),
-                 "r"(TL_HMX_ACTIVATION_RT), "r"(weight),
-                 "r"(TL_HMX_TILE_BYTES - 1)
-                 : "memory");
-  }
+  // Caller guarantees 1 <= n <= 32 and contiguous native tiles.
+  const uint32_t act_rt = TL_HMX_ACTIVATION_RT | ((n - 1) << 11);
+  const uint32_t weight_rt = n * TL_HMX_TILE_BYTES - 1;
+  asm volatile("{ activation.hf = mxmem(%0, %1):deep\n"
+               "  weight.hf = mxmem(%2, %3) }\n" ::"r"(a),
+               "r"(act_rt), "r"(w), "r"(weight_rt)
+               : "memory");
 }
 TL_HMX_INLINE void tl_hmx_convert_acc(int mode) {
   asm volatile("cvt.hf = acc(%0)" ::"r"(mode) : "memory");
@@ -651,9 +649,9 @@ TL_HMX_INLINE void tl_hexagon_hmx_clear_acc(void *acc_state) {
 }
 TL_HMX_INLINE void tl_hexagon_hmx_mma_atom(void *acc_state,
                                            const __fp16 *activation,
-                                           const __fp16 *weight) {
+                                           const __fp16 *weight, size_t n = 1) {
   (void)acc_state;
-  tl_hmx_mac_tiles(activation, weight, 1);
+  tl_hmx_mac_tiles(activation, weight, n);
 }
 TL_HMX_INLINE void tl_hexagon_hmx_convert_acc(void *cvt_state, void *acc_state,
                                               void *bias_state,

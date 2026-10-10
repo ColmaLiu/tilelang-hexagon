@@ -218,8 +218,7 @@ def make_gemm_f16_io(M, N, K, BN=128, copy_workers=1, fused_copy=False):
                 for mt in T.serial(M // 32):
                     for nt in T.serial(BN // 32):
                         emitter.clear(acc)
-                        for kt in T.serial(K // 32):
-                            emitter.mma_atom(acc, a_native, w_native, mt, nt, kt)
+                        emitter.mma_tile(acc, a_native, w_native, mt, nt)
                         emitter.convert(cvt, acc, bias_state, config)
                         emitter.store(cvt, acc, c_native, bias_state, config, mt, nt)
                 if fused_copy:

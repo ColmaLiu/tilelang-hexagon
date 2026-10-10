@@ -430,7 +430,7 @@ private:
       return;
     }
     if (op->op.same_as(tl::hexagon_hmx_mma())) {
-      ICHECK_EQ(op->args.size(), 3U);
+      ICHECK_EQ(op->args.size(), 4U);
       VisitExprWithAlignment(op->args[1], 2048); // activation
       VisitExprWithAlignment(op->args[2], 128);  // weight
       StmtExprVisitor::VisitExpr_(op);

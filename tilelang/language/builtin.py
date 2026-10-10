@@ -291,8 +291,14 @@ def hexagon_hmx_clear(acc_state):
     return tirx.call_intrin("void", tirx.op.Op.get("tl.hexagon_hmx_clear"), acc_state)
 
 
-def hexagon_hmx_mma(acc_state, activation_ptr, weight_ptr):
-    """Execute one 32x32x32 FP16 HMX multiply atom."""
+def hexagon_hmx_mma(acc_state, activation_ptr, weight_ptr, num_tiles=1):
+    """Multiply 1..32 contiguous native K tiles in one HMX deep packet.
+
+    Dynamic counts must satisfy this range at runtime. Both pointers must
+    expose ``num_tiles * 1024`` FP16 elements in native Crouton order.
+    """
+    if isinstance(num_tiles, (int, tirx.IntImm)) and not 1 <= int(num_tiles) <= 32:
+        raise ValueError("HMX deep num_tiles must be in [1, 32]")
 
     return tirx.call_intrin(
         "void",
@@ -300,6 +306,7 @@ def hexagon_hmx_mma(acc_state, activation_ptr, weight_ptr):
         acc_state,
         activation_ptr,
         weight_ptr,
+        num_tiles,
     )
 
 

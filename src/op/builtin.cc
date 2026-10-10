@@ -329,7 +329,7 @@ TIR_DEFINE_TL_BUILTIN(hexagon_hmx_clear)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(hexagon_hmx_mma)
-    .set_num_inputs(3)
+    .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

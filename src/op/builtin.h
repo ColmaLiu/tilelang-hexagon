@@ -529,7 +529,7 @@ TVM_DLL const Op &hexagon_hmx_load_bias();
 TVM_DLL const Op &hexagon_hmx_clear();
 
 /*!
- * \brief Execute one 32x32x32 HMX multiply atom.
+ * \brief Execute one HMX deep multiply packet for 1 to 32 contiguous K tiles.
  *
  * The memory operands are activation and weight Crouton tiles in VTCM.  The
  * result accumulates into the implicit accumulator state token.

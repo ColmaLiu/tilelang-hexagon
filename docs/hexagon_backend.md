@@ -294,3 +294,13 @@ direct-FastRPC runtime**. The result: the same `T.gemm` the user would write for
 runs idiomatically on the HMX matrix engine, composes into flash attention, and
 parallelizes across the 6 HW threads with the 1 HMX serialized — all validated on real
 hardware.
+
+### HMX K-tile packets
+
+`HMXIntrinEmitter.mma_tile()` reduces K for one output tile in DSL chunks of
+at most 32 contiguous native tiles. Each `hexagon_hmx_mma` intrinsic carries
+an explicit tile count and matching operand read extents; `tl_hmx_mac_tiles`
+emits one `:deep` packet and requires `1 <= n <= 32`. The caller handles the
+final partial chunk. `mma_atom()` and `T.hexagon_hmx_mma()` default to one tile
+for existing explicit schedules. Accumulator acquisition, clear, conversion,
+and output storage remain separate operations.

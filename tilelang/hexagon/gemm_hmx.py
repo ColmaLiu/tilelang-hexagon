@@ -94,10 +94,11 @@ class GemmHMX(GemmBase):
                 bias_vtcm[BIAS_WORDS // 2 + i] = T.Cast("uint32", 0)
 
             emitter.acquire(acc)
+            # All output tiles share this scale/bias configuration.
+            emitter.load_bias(bias, bias_vtcm)
             for inst_m_idx in T.serial(emitter.num_m_tiles):
                 for inst_n_idx in T.serial(emitter.num_n_tiles):
                     emitter.clear(acc)
-                    emitter.load_bias(bias, bias_vtcm)
                     emitter.mma_tile(
                         acc,
                         A_buf,
