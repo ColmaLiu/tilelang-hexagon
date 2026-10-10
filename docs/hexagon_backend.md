@@ -200,11 +200,10 @@ native Crouton VTCM offsets, and explicit HMX atoms.
   with non-alphabetical param names + non-square shapes, or symmetry hides the bug.*
 
 - **VTCM is one arena; partition it carefully.** Codegen bump-allocates `alloc_shared`
-  bottom-up and *publishes a high-water mark* (`tl_vtcm_shared_high_water`) so the
-  HMX gemm's top-down Crouton scratch can't overlap the live tiles. Under the worker
-  pool, VTCM is **partitioned per worker** (`base + wid*stride`), and a gemm-in-worker
-  carves its scratch from the worker's slice (`region_end`/`op_floor`), not the global
-  top.
+  bottom-up and publishes `tl_vtcm_shared_high_water` for embedding/export capacity
+  checks. Under the worker pool, VTCM is partitioned per worker (`base + wid*stride`).
+  HMX atoms and Crouton copies use explicit shared buffers; there is no hidden
+  top-down GEMM scratch allocation.
 
 - **The worker pool = 1 HMX + 6 HVX.** The producer/consumer model: the 6 HVX units
   run pack/unpack/softmax/copies in parallel; the 1 HMX MAC is serialized by a

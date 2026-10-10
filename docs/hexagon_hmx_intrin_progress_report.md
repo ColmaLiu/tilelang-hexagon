@@ -277,9 +277,9 @@ HVX/scalar 实现，单次 FastRPC wall time 也包含 marshaling 和启动开�
    数值误差达到 `0.121`，因此该实验没有进入 commit。
 5. **尚未完成流水与性能优化。** DMA queue、double buffering、copy/HVX 与 HMX overlap、
    transposed fast path 和 autotune 均不在本 commit 范围内。
-6. **旧 monolithic helper 尚未删除。** 新 `T.gemm` 已不再依赖
-   `tl_hexagon_hmx_gemm`，但旧 helper 仍用于兼容既有入口；后续可在调用点完全迁移后再
-   单独清理。
+6. **后续清理更新（2026-10-10）。** 已删除旧 monolithic GEMM、无状态 streaming、
+   整算子计时入口及其 codegen scratch 分支。当前保留 stateful HMX atoms、Crouton
+   layout-copy 和 runtime session/bridge。
 
 ## 7. 主要代码入口
 

@@ -66,7 +66,7 @@ flowchart TB
 
 - **整块 acquire 一次**（`tl_vtcm_acquire`，幂等），alloc_shared 与 HMX scratch 共用一个 arena，避免双重申请。
 - **arena 基址强制 2 KB 对齐**（`vtcm.h:33-36`）：HMX activation/output 地址要求 2 KB 对齐，weight 要求 128 B；arena 先满足最严格的基址约束，子分配再由 planner 按 operand 对齐。这是很多"静默垃圾"问题的根源。
-- **`tl_vtcm_shared_high_water`**（`vtcm.h:27-31`）：codegen 自底向上给 alloc_shared 分偏移并发布水位；HMX gemm 的 Crouton scratch 从顶向下生长，越界就返回 `-3` 拒绝，而不是覆盖活着的 tile。
+- **`tl_vtcm_shared_high_water`**（`vtcm.h:27-31`）：codegen 自底向上给 alloc_shared 分偏移并发布水位，供嵌入导出脚本计算 VTCM 容量需求；worker 路径使用独立分区，不写这个全局水位。
 
 ### 2.3 `worker.h` —— 工作流 5 的现有底座
 
@@ -86,7 +86,7 @@ flowchart TB
 
    这一个公式就是"布局是 ABI"的核心：DSL 侧 `hmx_intrin.py` 的 `T.Layout` forward 函数（`((m%32)//2)*64 + (k%32)*2 + m%2`）与它**逐 bit 一致**，两处必须同步改。
 3. **HVX 快速 pack/unpack**（`hmx.h:203-270`）：行对交织恰好等于一条 `vshuff`——两行源数据一条指令变成一个 row-pair 跨度（比逐元素 pack 快约 64×）；unpack 用 `vdeal` 逆变换。要求连续维是 64 的倍数，否则回退共享的标量 pack（转置操作数也走标量——这是已标注的后续优化点，`hmx.h:271-275`）。
-4. **当前 `T.gemm` 入口是 emitter**：`GemmHMX.infer_layout` 给 A/B/C 分配 native Crouton，`lower` 直接编排下一项的 atoms；shared-memory planner 按 operand 传播 A/C 2 KB、B 128 B、config 256 B 对齐，每个结果直接写入最终 C tile。`tl_hexagon_hmx_gemm` 与 top-down scratch 保留给历史/手写路径，不再是 TileLang `T.gemm` 的 lowering 结果。
+4. **当前 `T.gemm` 入口是 emitter**：`GemmHMX.infer_layout` 给 A/B/C 分配 native Crouton，`lower` 直接编排下一项的 atoms；shared-memory planner 按 operand 传播 A/C 2 KB、B 128 B、config 256 B 对齐，每个结果直接写入最终 C tile。旧 `tl_hexagon_hmx_gemm/gemm_mt` 及隐式 top-down scratch 路径已删除。
 5. **显式 atom**（`hmx.h:410-473`）：`tl_hexagon_hmx_acc_acquire/load_bias/clear_acc/mma_atom/convert_acc/store_cvt_state`——每个只包一条硬件协议操作。签名里的 `void *acc_state` 等参数**在 C 里全部 `(void)` 丢弃**：硬件状态本来就是隐式的，这些 token 只存在于 TIR 层，用来向编译器分析表达顺序与存活期（比如把 activation/weight 源指针一路携带到 store，阻止 shared-memory planner 在 HMX 流水线还占用它们时回收缓冲区，`hmx.h:457-473`）。
 
 ### 2.5 `qgemv.h` —— atom 的分层宣言（工作流 4 的样板）
@@ -139,7 +139,7 @@ return hmx_ok ? "hexagon.hmx" : "cpu.scalar";
 
 - **函数发射 `AddFunction`（125-360）**：两条路径。串行路径把 grid 直接降成嵌套 for（`thread_extent` 处理在 492-538）。**worker-pool 路径**（`hexagon.num_workers` attr > 0）发射五件东西：① 预扫描 TIR 统计每 worker 的 VTCM 需求（alloc_shared 操作数 + gemm Crouton scratch 取 max → `wp_stride_`，200-252）；② 参数打包 struct；③ `_worker` 回调（按需 per-thread HMX enable，失败返回 `TL_ERR_HMX`）；④ 把 **blockIdx.x 循环条带化**：`for (bx = tl_wid; bx < extent; bx += tl_nw)`（516-523）；⑤ 入口按**运行时实际 VTCM 授予量**削减 worker 数，一个 region 都放不下就返回 `TL_ERR_VTCM`（319-338）。没有 blockIdx.x 网格循环的 num_workers kernel 会被 ICHECK 拒绝——否则每个 worker 会重复整个网格并产生写竞争。
 - **VTCM 静态编排 `VisitStmt_(AllocBufferNode)`（362-415）**：shared scope 的缓冲**编译期**分配固定偏移：`(T*)((char*)tl_vtcm_base() + offset)`，偏移从 2048 起（**首个 2 KB tile 保留给 HMX 输出 scale**，133）、按 2 KB 对齐递增、随手发布 high-water；worker 模式额外加 `tl_wid * wp_stride_`。整个内存规划没有运行期分配器——编译期算好，运行期只查界。
-- **worker 模式 HMX 识别**：预扫描同时识别 HMX TIR intrinsic 和历史 `tl_hexagon_hmx_gemm`。当前 emitter atoms 使用每 worker 已静态分配的 shared buffers，不需要 `_mt` top-down scratch 重写。
+- **worker 模式 HMX 识别**：预扫描识别 HMX TIR intrinsic；emitter atoms 使用每 worker 已静态分配的 shared buffers。旧 `_mt` 重写及 scratch 预留分支已删除。
 - **HVX elementwise 向量化器（564-870）**：这是"{gemm, copy, map, reduce} 基"里 **map** 的实现，也是工作流 4 最该精读的部分。动机：Hexagon 标量单元没有 fp16，标量循环会编译成逐元素 libcall（`__extendhfsf2`）。`TryEmitHvxElementwise` 识别规范形态——最内层 `for j in [0,N)`、N 是 64 的倍数、单条 fp16 标量 store、下标对 j 单位步长——然后按 64 列一组发射：`widen fp16→fp32(lo,hi) → fp32 计算 → narrow 回 fp16`。实现上先跑一遍 **probe（emit=false）** 确认整棵表达式树可发射，再真正 emit，保证不会发射一半再回退。还内置惯用法识别：`1.0/sqrt(x)` → `tl_hvx_rsqrt_vsf`（一条指令且更准）、`exp(x)` → `exp2(x·log2e)`；j 无关子式求值一次后 splat；对齐可证明时用对齐 load/store，否则 `vmemu`。不匹配的整体回退 CodeGenC 标量循环。
 - **杂项**：`PrintType` 支持到 128 lane（HVX 一寄存器 = 128×int8/64×fp16/32×fp32）；`Broadcast` 发射 `((float4)(v))` 的 splat 构造。
 

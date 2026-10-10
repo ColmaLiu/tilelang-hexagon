@@ -1,55 +1,39 @@
 #pragma once
-// HMX FP16 matmul runtime for tilelang-generated Hexagon kernels.  All the HMX/HVX/
-// VTCM/Crouton hardware intimacy lives here; the codegen stays a thin C emitter that
-// just calls into it.  Distilled from the verified mini-htp / htp-ops-lib recipes.
+// HMX FP16 matmul runtime for tilelang-generated Hexagon kernels. All the
+// HMX/HVX/ VTCM/Crouton hardware intimacy lives here; the codegen stays a thin
+// C emitter that just calls into it. Distilled from the verified mini-htp /
+// htp-ops-lib recipes.
 //
-// Codegen exposes two layers.  New quantized kernels use explicit
-// acquire/load-bias/clear/mma/convert/store/release atoms with T.Layout-defined
-// Crouton buffers. Producers may either write the final Crouton directly (the
-// explicit quantized path) or use the row-major/native T.copy pack boundary below,
-// so quantization formats do not become opaque HMX runtime calls.
-// The compatibility layer remains:
-//   tl_hexagon_hmx_gemm(C,A,B,M,N,K,ta,tb)              <- a serial/tiled T.gemm; operands
-//       are row-major in VTCM (alloc_shared), HVX-packed to a top-of-VTCM Crouton
-//       scratch, MAC'd, HVX-unpacked.  Scratch guarded by the codegen high-water.
-//   tl_hexagon_hmx_gemm_mt(...,region_end,op_floor)     <- a T.gemm inside a worker-pool
-//       kernel; scratch lives in THIS worker's VTCM slice (per-worker region bounds
-//       supplied by the codegen) so concurrent workers don't collide.
-// Shared building blocks: the session (power/VTCM/HMX acquire + unit-scale fill), the
-// HVX Crouton pack/unpack (tl_hmx_pack_A/B, unpack_C, the transposed/scalar variants),
-// tl_hmx_matmul_tiles (the mxclracc->mxmem MAC, under the accumulator spinlock).
+// T.gemm and explicit DSL kernels use stateful HMX instruction atoms.
+// Layout-copy helpers transform caller-owned buffers; the runtime owns
+// sessions.
 //
-// Also kept (NOT the DSL path): tl_hexagon_hmx_matmul_f16 / _f16_bench — a raw
-// call_extern matmul + its qtimer HMX-throughput reference (~17 TFLOPS); useful to
-// exercise the MAC in isolation.  (The earlier template-level batched worker pool was
-// retired once the idiomatic codegen worker pool superseded it — see git history.)
-//
-// Compiled into the FastRPC skel (.cc) with the Hexagon SDK on the include path and
-// -mhmx; it pulls in HAP headers, so it is only included by kernels that use HMX.
+// Compiled into the FastRPC skel (.cc) with the Hexagon SDK on the include path
+// and -mhmx; it pulls in HAP headers, so it is only included by kernels that
+// use HMX.
 #include <HAP_compute_res.h>
-#include <HAP_farf.h>
-#include <HAP_perf.h>
+#include <HAP_perf.h> // Generated DSP timing wrappers also use the qtimer API.
 #include <HAP_power.h>
 #include <hexagon_types.h> // HVX_Vector + Q6_* intrinsics (needs -mhvx)
 #include <hmx_hexagon_protos.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-#include <tl_templates/hexagon/vtcm.h>   // unified VTCM arena (shared with alloc_shared)
-#include <tl_templates/hexagon/worker.h> // HW-thread worker pool (multithreaded HMX/HVX)
 #include <tl_templates/hexagon/qmatmul.h> // reusable FP32/Crouton row-pair atoms
+#include <tl_templates/hexagon/vtcm.h> // unified VTCM arena (shared with alloc_shared)
+#include <tl_templates/hexagon/worker.h> // HW-thread worker pool (multithreaded HMX/HVX)
 
 #define TL_HMX_INLINE static inline __attribute__((unused, always_inline))
 
-// DDR matrix slices are not guaranteed to retain 128-byte alignment.  Keep the
+// DDR matrix slices are not guaranteed to retain 128-byte alignment. Keep the
 // fused row-major <-> Crouton helpers correct for arbitrary submatrix bases;
 // hexagon-clang lowers the aligned(1) accesses to unaligned HVX vmem forms.
-typedef HVX_Vector tl_hmx_uvector __attribute__((aligned(1)));
+typedef HVX_Vector tl_hmx_unaligned_vector __attribute__((aligned(1)));
 TL_HMX_INLINE HVX_Vector tl_hmx_loadu(const void *p) {
-  return *(const tl_hmx_uvector *)p;
+  return *(const tl_hmx_unaligned_vector *)p;
 }
 TL_HMX_INLINE void tl_hmx_storeu(void *p, HVX_Vector value) {
-  *(tl_hmx_uvector *)p = value;
+  *(tl_hmx_unaligned_vector *)p = value;
 }
 
 // ------------------------------ power -------------------------------------
@@ -87,9 +71,9 @@ TL_HMX_INLINE void tl_hmx_power_reset(void) {
 }
 
 // ------------------------------ VTCM --------------------------------------
-// Delegated to the shared tl_vtcm arena (vtcm.h) so HMX scratch and alloc_shared
-// operands draw from one acquisition — no double-acquire when a T.gemm kernel
-// has its operands in VTCM and also drives HMX.
+// Delegated to the shared tl_vtcm arena (vtcm.h) so HMX scratch and
+// alloc_shared operands draw from one acquisition — no double-acquire when a
+// T.gemm kernel has its operands in VTCM and also drives HMX.
 TL_HMX_INLINE void tl_hmx_vtcm_setup(void) { tl_vtcm_acquire(); }
 TL_HMX_INLINE void tl_hmx_vtcm_reset(void) { tl_vtcm_release(); }
 
@@ -108,8 +92,8 @@ TL_HMX_INLINE void tl_hmx_reset(void) {
   tl_hmx_ctx = 0;
 }
 // Per-thread HMX SHARED enable: each thread that issues HMX MACs must call this
-// once.  Returns 0 if this thread now holds the lock, non-zero on failure (incl. no
-// ctx) so callers can refuse rather than run MACs with HMX unlocked.
+// once. Returns 0 if this thread now holds the lock, non-zero on failure
+// (incl. no ctx) so callers can refuse rather than run MACs with HMX unlocked.
 TL_HMX_INLINE int tl_hmx_enable(void) {
   if (!tl_hmx_ctx)
     return -1;
@@ -131,11 +115,12 @@ TL_HMX_INLINE void tl_hmx_unit_acquire(void) {
                "3:"
                : "+r"(lp)::"p0", "r0");
 }
-// Release with a plain volatile store (matching htp-ops-lib's hmx_mgr).  No extra
-// barrier is needed: the only state the lock guards is the HMX accumulator, which
-// the next holder unconditionally re-clears (mxclracc) before use, and every worker
-// reads its accumulator out to its OWN VTCM region — so no worker depends on
-// another's in-flight accumulator/VTCM writes being visible at release time.
+// Release with a plain volatile store (matching htp-ops-lib's hmx_mgr). No
+// extra barrier is needed: the only state the lock guards is the HMX
+// accumulator, which the next holder unconditionally re-clears (mxclracc)
+// before use, and every worker reads its accumulator out to its OWN VTCM region
+// — so no worker depends on another's in-flight accumulator/VTCM writes being
+// visible at release time.
 TL_HMX_INLINE void tl_hmx_unit_release(void) {
   *(volatile int *)&tl_hmx_spin = 0;
 }
@@ -145,8 +130,8 @@ TL_HMX_INLINE void tl_hmx_unit_release(void) {
 #define TL_HMX_TILE_ELMS 1024
 #define TL_HMX_TILE_BYTES 2048
 #define TL_HMX_SPATIAL_MASK 0x1cu
-#define TL_HMX_SPATIAL_RT                                                  \
-  ((((TL_HMX_SPATIAL_MASK) >> 1) << 7) | (((TL_HMX_SPATIAL_MASK)&1u) << 1))
+#define TL_HMX_SPATIAL_RT                                                      \
+  ((((TL_HMX_SPATIAL_MASK) >> 1) << 7) | (((TL_HMX_SPATIAL_MASK) & 1u) << 1))
 #define TL_HMX_ACTIVATION_RT (TL_HMX_SPATIAL_RT | (31u << 2))
 
 TL_HMX_INLINE void tl_hmx_clear_acc(void) {
@@ -156,16 +141,16 @@ TL_HMX_INLINE void tl_hmx_set_scales(const void *s) {
   asm volatile("bias = mxmem2(%0)" ::"r"(s) : "memory");
 }
 // Fill a 256-byte HMX output-scale region: per-column scale = fp16 1.0 (u32 low
-// half == 0x3c00), per-column bias = 0.  Single source for the u32 scale-word
-// layout, filled once per session (tl_hmx_session_init) for the gemm/matmul path
-// and inline by the standalone bench.
+// half == 0x3c00), per-column bias = 0. Single source for the u32 scale-word
+// layout, initialized by standalone sessions and the embedding bridge.
 TL_HMX_INLINE void tl_hmx_fill_unit_scales(uint32_t *s) {
   for (int i = 0; i < 32; ++i)
     s[i] = 0x00003c00u;
   for (int i = 32; i < 64; ++i)
     s[i] = 0u;
 }
-TL_HMX_INLINE void tl_hmx_mac_tiles(const __fp16 *a, const __fp16 *w, size_t n) {
+TL_HMX_INLINE void tl_hmx_mac_tiles(const __fp16 *a, const __fp16 *w,
+                                    size_t n) {
   for (size_t i = 0; i < n; ++i) {
     const __fp16 *activation = a + i * TL_HMX_TILE_ELMS;
     const __fp16 *weight = w + i * TL_HMX_TILE_ELMS;
@@ -183,110 +168,118 @@ TL_HMX_INLINE void tl_hmx_store_cvt(__fp16 *o) {
   asm volatile("mxmem(%0, %1) = cvt" ::"r"(o), "r"(TL_HMX_SPATIAL_RT)
                : "memory");
 }
-TL_HMX_INLINE void tl_hmx_store_tile(__fp16 *o) {
-  tl_hmx_convert_acc(2);
-  tl_hmx_store_cvt(o);
-}
-
 // Crouton 32x32 tile layout: (row i, col j) -> (i&~1)*32 + j*2 + (i&1).
-TL_HMX_INLINE int tl_hmx_cpos(int i, int j) {
+TL_HMX_INLINE int tl_hmx_crouton_tile_offset(int i, int j) {
   return (i & ~1) * 32 + j * 2 + (i & 1);
 }
-// Element offset of operand coord (r,c) in a Crouton-tiled scratch whose tile grid
-// is `ntc` tiles wide.  `swap` selects the col-tile-major B intra-tile order
-// (cpos(c,r)) vs the row-tile-major A/C order (cpos(r,c)).  One source of truth for
-// the tile addressing, used by every scalar pack/unpack fallback below.
-TL_HMX_INLINE size_t tl_hmx_off(int r, int c, int ntc, int swap) {
-  size_t tile = ((size_t)(r / TL_HMX_T) * ntc + c / TL_HMX_T) * TL_HMX_TILE_ELMS;
+// Element offset of operand coord (r,c) in a Crouton-tiled scratch whose tile
+// grid is `tile_cols` tiles wide. `transpose_tile` selects the weight
+// intra-tile order (column, row) vs the activation/output order (row, column).
+// One source of truth for the tile addressing, used by every scalar pack/unpack
+// fallback below.
+TL_HMX_INLINE size_t tl_hmx_crouton_offset(int r, int c, int tile_cols,
+                                           int transpose_tile) {
+  size_t tile =
+      ((size_t)(r / TL_HMX_T) * tile_cols + c / TL_HMX_T) * TL_HMX_TILE_ELMS;
   int pr = r % TL_HMX_T, pc = c % TL_HMX_T;
-  return tile + (swap ? tl_hmx_cpos(pc, pr) : tl_hmx_cpos(pr, pc));
+  return tile + (transpose_tile ? tl_hmx_crouton_tile_offset(pc, pr)
+                                : tl_hmx_crouton_tile_offset(pr, pc));
 }
 
-// Scalar Crouton pack: source logical element (i,j) lives at src[i*si + j*sj], over
-// an R x C logical shape, into a tile grid `ntc` wide; `swap` picks the B intra-tile
-// order.  The HVX fast paths (pack_A/pack_B) handle the common 64-multiple case;
-// this covers the remainder AND the transposed operands (whose strided source would
-// need gathered HVX loads), so all four scalar packs share one body.
-TL_HMX_INLINE void tl_hmx_pack_scalar(__fp16 *t, const __fp16 *src, int R, int C,
-                                      int ntc, int si, int sj, int swap) {
-  for (int i = 0; i < R; ++i)
-    for (int j = 0; j < C; ++j)
-      t[tl_hmx_off(i, j, ntc, swap)] = src[(size_t)i * si + (size_t)j * sj];
+// Scalar Crouton pack: source logical element (i,j) lives at src[i*row_stride +
+// j*col_stride], over a rows x cols logical shape, into a tile grid `tile_cols`
+// wide; `transpose_tile` picks the weight intra-tile order. The
+// activation/weight HVX fast paths handle the common 64-multiple case; this
+// covers the remainder AND the transposed operands (whose strided source would
+// need gathered HVX loads), sharing one scalar fallback body.
+TL_HMX_INLINE void
+tl_hmx_pack_crouton_scalar_f16(__fp16 *dst, const __fp16 *src, int rows,
+                               int cols, int tile_cols, int row_stride,
+                               int col_stride, int transpose_tile) {
+  for (int i = 0; i < rows; ++i)
+    for (int j = 0; j < cols; ++j)
+      dst[tl_hmx_crouton_offset(i, j, tile_cols, transpose_tile)] =
+          src[(size_t)i * row_stride + (size_t)j * col_stride];
 }
 // Crouton's intra-tile layout IS a row-pair interleave, so one HVX `vshuff` of
-// two source rows produces a whole 64-element row-pair span (lo half -> the even
-// tile, hi half -> the next tile).  ~64x the scalar element-by-element pack.  The
-// 64-column chunk spans 2 tiles, so the contiguous dim must be a 64-multiple;
-// otherwise fall back to the scalar pack.
-TL_HMX_INLINE void tl_hmx_pack_A_strided(__fp16 *t, const __fp16 *A, int M,
-                                         int K, int si, int sj) {
+// two source rows produces a whole 64-element row-pair span (lo half -> the
+// even tile, hi half -> the next tile). The 64-column chunk spans 2 tiles, so
+// the contiguous dim must be a 64-multiple; otherwise fall back to the scalar
+// pack.
+TL_HMX_INLINE void tl_hmx_pack_activation_strided_f16(__fp16 *dst,
+                                                      const __fp16 *src, int M,
+                                                      int K, int row_stride,
+                                                      int col_stride) {
   int KT = K / TL_HMX_T;
-  if (sj == 1 && (K & 63) == 0) {
+  if (col_stride == 1 && (K & 63) == 0) {
     for (int mt = 0; mt < M / TL_HMX_T; ++mt)
       for (int r = 0; r < TL_HMX_T / 2; ++r) { // 16 row-pairs per tile
-        for (int kc = 0; kc < K / 64; ++kc) { // 64 cols == 2 k-tiles
-          const __fp16 *r0 = A + (size_t)(mt * TL_HMX_T + 2 * r) * si + kc * 64;
+        for (int kc = 0; kc < K / 64; ++kc) {  // 64 cols == 2 k-tiles
+          const __fp16 *r0 =
+              src + (size_t)(mt * TL_HMX_T + 2 * r) * row_stride + kc * 64;
           const __fp16 *r1 =
-              A + (size_t)(mt * TL_HMX_T + 2 * r + 1) * si + kc * 64;
+              src + (size_t)(mt * TL_HMX_T + 2 * r + 1) * row_stride + kc * 64;
           HVX_VectorPair vp =
               Q6_W_vshuff_VVR(tl_hmx_loadu(r1), tl_hmx_loadu(r0), -2);
-          tl_hmx_storeu(t + (size_t)(mt * KT + 2 * kc) * TL_HMX_TILE_ELMS +
+          tl_hmx_storeu(dst + (size_t)(mt * KT + 2 * kc) * TL_HMX_TILE_ELMS +
                             r * 64,
                         Q6_V_lo_W(vp));
-          tl_hmx_storeu(t + (size_t)(mt * KT + 2 * kc + 1) * TL_HMX_TILE_ELMS +
-                            r * 64,
-                        Q6_V_hi_W(vp));
+          tl_hmx_storeu(
+              dst + (size_t)(mt * KT + 2 * kc + 1) * TL_HMX_TILE_ELMS + r * 64,
+              Q6_V_hi_W(vp));
         }
       }
     return;
   }
-  tl_hmx_pack_scalar(t, A, M, K, KT, si, sj, 0);
+  tl_hmx_pack_crouton_scalar_f16(dst, src, M, K, KT, row_stride, col_stride, 0);
 }
-TL_HMX_INLINE void tl_hmx_pack_A(__fp16 *t, const __fp16 *A, int M, int K) {
-  tl_hmx_pack_A_strided(t, A, M, K, K, 1);
-}
-TL_HMX_INLINE void tl_hmx_pack_B_strided(__fp16 *t, const __fp16 *B, int K,
-                                         int N, int si, int sj) {
+TL_HMX_INLINE void tl_hmx_pack_weight_strided_f16(__fp16 *dst,
+                                                  const __fp16 *src, int K,
+                                                  int N, int row_stride,
+                                                  int col_stride) {
   int KT = K / TL_HMX_T;
-  if (sj == 1 && (N & 63) == 0) {
+  if (col_stride == 1 && (N & 63) == 0) {
     for (int kt = 0; kt < KT; ++kt)
       for (int r = 0; r < TL_HMX_T / 2; ++r) { // 16 k-row-pairs per k-tile
-        for (int nc = 0; nc < N / 64; ++nc) { // 64 cols == 2 n-tiles
-          const __fp16 *r0 = B + (size_t)(kt * TL_HMX_T + 2 * r) * si + nc * 64;
+        for (int nc = 0; nc < N / 64; ++nc) {  // 64 cols == 2 n-tiles
+          const __fp16 *r0 =
+              src + (size_t)(kt * TL_HMX_T + 2 * r) * row_stride + nc * 64;
           const __fp16 *r1 =
-              B + (size_t)(kt * TL_HMX_T + 2 * r + 1) * si + nc * 64;
+              src + (size_t)(kt * TL_HMX_T + 2 * r + 1) * row_stride + nc * 64;
           HVX_VectorPair vp =
               Q6_W_vshuff_VVR(tl_hmx_loadu(r1), tl_hmx_loadu(r0), -2);
-          tl_hmx_storeu(t + (size_t)((2 * nc) * KT + kt) * TL_HMX_TILE_ELMS +
+          tl_hmx_storeu(dst + (size_t)((2 * nc) * KT + kt) * TL_HMX_TILE_ELMS +
                             r * 64,
                         Q6_V_lo_W(vp));
-          tl_hmx_storeu(t + (size_t)((2 * nc + 1) * KT + kt) * TL_HMX_TILE_ELMS +
-                            r * 64,
-                        Q6_V_hi_W(vp));
+          tl_hmx_storeu(
+              dst + (size_t)((2 * nc + 1) * KT + kt) * TL_HMX_TILE_ELMS +
+                  r * 64,
+              Q6_V_hi_W(vp));
         }
       }
     return;
   }
-  tl_hmx_pack_scalar(t, B, N, K, KT, sj, si, 1);
+  tl_hmx_pack_crouton_scalar_f16(dst, src, N, K, KT, col_stride, row_stride, 1);
 }
-TL_HMX_INLINE void tl_hmx_pack_B(__fp16 *t, const __fp16 *B, int K, int N) {
-  tl_hmx_pack_B_strided(t, B, K, N, N, 1);
-}
-TL_HMX_INLINE void tl_hmx_unpack_C_strided(__fp16 *C, const __fp16 *t, int M,
-                                           int N, int si, int sj) {
+TL_HMX_INLINE void tl_hmx_unpack_output_strided_f16(__fp16 *dst,
+                                                    const __fp16 *src, int M,
+                                                    int N, int row_stride,
+                                                    int col_stride) {
   int NT = N / TL_HMX_T;
-  if (sj == 1 && (N & 63) == 0) {
+  if (col_stride == 1 && (N & 63) == 0) {
     for (int mt = 0; mt < M / TL_HMX_T; ++mt)
       for (int r = 0; r < TL_HMX_T / 2; ++r) {
         for (int nc = 0; nc < N / 64; ++nc) {
           HVX_Vector lo = tl_hmx_loadu(
-              t + (size_t)(mt * NT + 2 * nc) * TL_HMX_TILE_ELMS + r * 64);
+              src + (size_t)(mt * NT + 2 * nc) * TL_HMX_TILE_ELMS + r * 64);
           HVX_Vector hi = tl_hmx_loadu(
-              t + (size_t)(mt * NT + 2 * nc + 1) * TL_HMX_TILE_ELMS + r * 64);
+              src + (size_t)(mt * NT + 2 * nc + 1) * TL_HMX_TILE_ELMS + r * 64);
           HVX_VectorPair vp = Q6_W_vdeal_VVR(hi, lo, -2);
-          tl_hmx_storeu(C + (size_t)(mt * TL_HMX_T + 2 * r) * si + nc * 64,
+          tl_hmx_storeu(dst + (size_t)(mt * TL_HMX_T + 2 * r) * row_stride +
+                            nc * 64,
                         Q6_V_lo_W(vp));
-          tl_hmx_storeu(C + (size_t)(mt * TL_HMX_T + 2 * r + 1) * si + nc * 64,
+          tl_hmx_storeu(dst + (size_t)(mt * TL_HMX_T + 2 * r + 1) * row_stride +
+                            nc * 64,
                         Q6_V_hi_W(vp));
         }
       }
@@ -294,123 +287,53 @@ TL_HMX_INLINE void tl_hmx_unpack_C_strided(__fp16 *C, const __fp16 *t, int M,
   }
   for (int m = 0; m < M; ++m)
     for (int n = 0; n < N; ++n)
-      C[(size_t)m * si + (size_t)n * sj] = t[tl_hmx_off(m, n, NT, 0)];
+      dst[(size_t)m * row_stride + (size_t)n * col_stride] =
+          src[tl_hmx_crouton_offset(m, n, NT, 0)];
 }
-TL_HMX_INLINE void tl_hmx_unpack_C(__fp16 *C, const __fp16 *t, int M, int N) {
-  tl_hmx_unpack_C_strided(C, t, M, N, N, 1);
-}
-// Scalar transposed packs (HVX would need strided/gathered source loads): A stored
-// [K,M] (trans_a) / B stored [N,K] (trans_b).  trans_a=false is the usual case;
-// trans_b=true is the common linear-layer / attention QKᵀ form, so this scalar pack
-// is on the hot path for those — an HVX transposed pack is a tracked follow-up.
-// Both reduce to the shared scalar packer with a swapped source stride.
-TL_HMX_INLINE void tl_hmx_pack_A_T(__fp16 *t, const __fp16 *A, int M, int K) {
-  tl_hmx_pack_scalar(t, A, M, K, K / TL_HMX_T, 1, M, 0); // A[k*M+m], row-tile-major
-}
-TL_HMX_INLINE void tl_hmx_pack_B_T(__fp16 *t, const __fp16 *B, int K, int N) {
-  tl_hmx_pack_scalar(t, B, N, K, K / TL_HMX_T, K, 1, 1); // B[n*K+k], col-tile (swap)
+// One butterfly stage of the packed-FP16 transpose. Keep the shuffle
+// width and all vector indices constant after inlining and loop unrolling.
+template <int Step>
+TL_HMX_INLINE void tl_hmx_transpose_pairs_stage_f16(HVX_Vector (&v)[32]) {
+#pragma unroll
+  for (int base = 0; base < 32; base += 2 * Step) {
+#pragma unroll
+    for (int j = 0; j < Step; ++j) {
+      HVX_VectorPair p =
+          Q6_W_vshuff_VVR(v[base + j + Step], v[base + j], -4 * Step);
+      v[base + j] = Q6_V_lo_W(p);
+      v[base + j + Step] = Q6_V_hi_W(p);
+    }
+  }
 }
 
-// Transpose one 32x32 matrix of packed FP16 pairs in registers. The word
-// at [n, kp] contains W[n, 2*kp:2*kp+2]; after transpose one HVX vector
-// is exactly one Crouton K-row pair across 32 N columns. Five butterfly
-// stages avoid scatter and its readback fence. All source loads are 128B
-// and stay inside the caller's 32x64 logical rectangle.
-TL_HMX_INLINE void tl_hmx_pack_weight_32x64(__fp16 *dst,
-                                           const __fp16 *src, int si) {
-#define TL_HMX_LOAD_ROW(n) HVX_Vector v##n = *(const HVX_Vector *)(src + (size_t)(n) * si)
-#define TL_HMX_SHUFFLE(a, b, shift) do { \
-  HVX_VectorPair p = Q6_W_vshuff_VVR(v##b, v##a, shift); \
-  v##a = Q6_V_lo_W(p); v##b = Q6_V_hi_W(p); \
-} while (0)
-  TL_HMX_LOAD_ROW(0); TL_HMX_LOAD_ROW(1); TL_HMX_LOAD_ROW(2); TL_HMX_LOAD_ROW(3);
-  TL_HMX_LOAD_ROW(4); TL_HMX_LOAD_ROW(5); TL_HMX_LOAD_ROW(6); TL_HMX_LOAD_ROW(7);
-  TL_HMX_LOAD_ROW(8); TL_HMX_LOAD_ROW(9); TL_HMX_LOAD_ROW(10); TL_HMX_LOAD_ROW(11);
-  TL_HMX_LOAD_ROW(12); TL_HMX_LOAD_ROW(13); TL_HMX_LOAD_ROW(14); TL_HMX_LOAD_ROW(15);
-  TL_HMX_LOAD_ROW(16); TL_HMX_LOAD_ROW(17); TL_HMX_LOAD_ROW(18); TL_HMX_LOAD_ROW(19);
-  TL_HMX_LOAD_ROW(20); TL_HMX_LOAD_ROW(21); TL_HMX_LOAD_ROW(22); TL_HMX_LOAD_ROW(23);
-  TL_HMX_LOAD_ROW(24); TL_HMX_LOAD_ROW(25); TL_HMX_LOAD_ROW(26); TL_HMX_LOAD_ROW(27);
-  TL_HMX_LOAD_ROW(28); TL_HMX_LOAD_ROW(29); TL_HMX_LOAD_ROW(30); TL_HMX_LOAD_ROW(31);
-  // Interleave groups of 1 packed words.
-  TL_HMX_SHUFFLE(0, 1, -4); TL_HMX_SHUFFLE(2, 3, -4);
-  TL_HMX_SHUFFLE(4, 5, -4); TL_HMX_SHUFFLE(6, 7, -4);
-  TL_HMX_SHUFFLE(8, 9, -4); TL_HMX_SHUFFLE(10, 11, -4);
-  TL_HMX_SHUFFLE(12, 13, -4); TL_HMX_SHUFFLE(14, 15, -4);
-  TL_HMX_SHUFFLE(16, 17, -4); TL_HMX_SHUFFLE(18, 19, -4);
-  TL_HMX_SHUFFLE(20, 21, -4); TL_HMX_SHUFFLE(22, 23, -4);
-  TL_HMX_SHUFFLE(24, 25, -4); TL_HMX_SHUFFLE(26, 27, -4);
-  TL_HMX_SHUFFLE(28, 29, -4); TL_HMX_SHUFFLE(30, 31, -4);
-  // Interleave groups of 2 packed words.
-  TL_HMX_SHUFFLE(0, 2, -8); TL_HMX_SHUFFLE(1, 3, -8);
-  TL_HMX_SHUFFLE(4, 6, -8); TL_HMX_SHUFFLE(5, 7, -8);
-  TL_HMX_SHUFFLE(8, 10, -8); TL_HMX_SHUFFLE(9, 11, -8);
-  TL_HMX_SHUFFLE(12, 14, -8); TL_HMX_SHUFFLE(13, 15, -8);
-  TL_HMX_SHUFFLE(16, 18, -8); TL_HMX_SHUFFLE(17, 19, -8);
-  TL_HMX_SHUFFLE(20, 22, -8); TL_HMX_SHUFFLE(21, 23, -8);
-  TL_HMX_SHUFFLE(24, 26, -8); TL_HMX_SHUFFLE(25, 27, -8);
-  TL_HMX_SHUFFLE(28, 30, -8); TL_HMX_SHUFFLE(29, 31, -8);
-  // Interleave groups of 4 packed words.
-  TL_HMX_SHUFFLE(0, 4, -16); TL_HMX_SHUFFLE(1, 5, -16);
-  TL_HMX_SHUFFLE(2, 6, -16); TL_HMX_SHUFFLE(3, 7, -16);
-  TL_HMX_SHUFFLE(8, 12, -16); TL_HMX_SHUFFLE(9, 13, -16);
-  TL_HMX_SHUFFLE(10, 14, -16); TL_HMX_SHUFFLE(11, 15, -16);
-  TL_HMX_SHUFFLE(16, 20, -16); TL_HMX_SHUFFLE(17, 21, -16);
-  TL_HMX_SHUFFLE(18, 22, -16); TL_HMX_SHUFFLE(19, 23, -16);
-  TL_HMX_SHUFFLE(24, 28, -16); TL_HMX_SHUFFLE(25, 29, -16);
-  TL_HMX_SHUFFLE(26, 30, -16); TL_HMX_SHUFFLE(27, 31, -16);
-  // Interleave groups of 8 packed words.
-  TL_HMX_SHUFFLE(0, 8, -32); TL_HMX_SHUFFLE(1, 9, -32);
-  TL_HMX_SHUFFLE(2, 10, -32); TL_HMX_SHUFFLE(3, 11, -32);
-  TL_HMX_SHUFFLE(4, 12, -32); TL_HMX_SHUFFLE(5, 13, -32);
-  TL_HMX_SHUFFLE(6, 14, -32); TL_HMX_SHUFFLE(7, 15, -32);
-  TL_HMX_SHUFFLE(16, 24, -32); TL_HMX_SHUFFLE(17, 25, -32);
-  TL_HMX_SHUFFLE(18, 26, -32); TL_HMX_SHUFFLE(19, 27, -32);
-  TL_HMX_SHUFFLE(20, 28, -32); TL_HMX_SHUFFLE(21, 29, -32);
-  TL_HMX_SHUFFLE(22, 30, -32); TL_HMX_SHUFFLE(23, 31, -32);
-  // Interleave groups of 16 packed words.
-  TL_HMX_SHUFFLE(0, 16, -64); TL_HMX_SHUFFLE(1, 17, -64);
-  TL_HMX_SHUFFLE(2, 18, -64); TL_HMX_SHUFFLE(3, 19, -64);
-  TL_HMX_SHUFFLE(4, 20, -64); TL_HMX_SHUFFLE(5, 21, -64);
-  TL_HMX_SHUFFLE(6, 22, -64); TL_HMX_SHUFFLE(7, 23, -64);
-  TL_HMX_SHUFFLE(8, 24, -64); TL_HMX_SHUFFLE(9, 25, -64);
-  TL_HMX_SHUFFLE(10, 26, -64); TL_HMX_SHUFFLE(11, 27, -64);
-  TL_HMX_SHUFFLE(12, 28, -64); TL_HMX_SHUFFLE(13, 29, -64);
-  TL_HMX_SHUFFLE(14, 30, -64); TL_HMX_SHUFFLE(15, 31, -64);
-  // Butterfly register indices are the five-bit reversal of K-pair index.
-  *(HVX_Vector *)(dst + 0) = v0;
-  *(HVX_Vector *)(dst + 64) = v16;
-  *(HVX_Vector *)(dst + 128) = v8;
-  *(HVX_Vector *)(dst + 192) = v24;
-  *(HVX_Vector *)(dst + 256) = v4;
-  *(HVX_Vector *)(dst + 320) = v20;
-  *(HVX_Vector *)(dst + 384) = v12;
-  *(HVX_Vector *)(dst + 448) = v28;
-  *(HVX_Vector *)(dst + 512) = v2;
-  *(HVX_Vector *)(dst + 576) = v18;
-  *(HVX_Vector *)(dst + 640) = v10;
-  *(HVX_Vector *)(dst + 704) = v26;
-  *(HVX_Vector *)(dst + 768) = v6;
-  *(HVX_Vector *)(dst + 832) = v22;
-  *(HVX_Vector *)(dst + 896) = v14;
-  *(HVX_Vector *)(dst + 960) = v30;
-  *(HVX_Vector *)(dst + 1024) = v1;
-  *(HVX_Vector *)(dst + 1088) = v17;
-  *(HVX_Vector *)(dst + 1152) = v9;
-  *(HVX_Vector *)(dst + 1216) = v25;
-  *(HVX_Vector *)(dst + 1280) = v5;
-  *(HVX_Vector *)(dst + 1344) = v21;
-  *(HVX_Vector *)(dst + 1408) = v13;
-  *(HVX_Vector *)(dst + 1472) = v29;
-  *(HVX_Vector *)(dst + 1536) = v3;
-  *(HVX_Vector *)(dst + 1600) = v19;
-  *(HVX_Vector *)(dst + 1664) = v11;
-  *(HVX_Vector *)(dst + 1728) = v27;
-  *(HVX_Vector *)(dst + 1792) = v7;
-  *(HVX_Vector *)(dst + 1856) = v23;
-  *(HVX_Vector *)(dst + 1920) = v15;
-  *(HVX_Vector *)(dst + 1984) = v31;
-#undef TL_HMX_SHUFFLE
-#undef TL_HMX_LOAD_ROW
+// Transpose a 32x64 FP16 source rectangle as 32x32 packed pairs. Each
+// resulting vector holds one Crouton row pair across 32 columns. The first
+// 16 vectors form one tile, the next 16 form a second tile. dst_tile_stride
+// is measured in FP16 elements: weight tiles are adjacent, whereas activation
+// tiles are separated by a complete K tile row. No source padding is read.
+TL_HMX_INLINE void tl_hmx_pack_transposed_32x64_f16(__fp16 *dst,
+                                                    const __fp16 *src,
+                                                    int row_stride,
+                                                    size_t dst_tile_stride) {
+  HVX_Vector v[32];
+#pragma unroll
+  for (int n = 0; n < 32; ++n)
+    v[n] = *(const HVX_Vector *)(src + (size_t)n * row_stride);
+
+  tl_hmx_transpose_pairs_stage_f16<1>(v);
+  tl_hmx_transpose_pairs_stage_f16<2>(v);
+  tl_hmx_transpose_pairs_stage_f16<4>(v);
+  tl_hmx_transpose_pairs_stage_f16<8>(v);
+  tl_hmx_transpose_pairs_stage_f16<16>(v);
+
+#pragma unroll
+  for (int kp = 0; kp < 32; ++kp) {
+    // Butterfly register indices are the five-bit reversal of K-pair index.
+    int index = ((kp & 1) << 4) | ((kp & 2) << 2) | (kp & 4) | ((kp & 8) >> 2) |
+                ((kp & 16) >> 4);
+    *(HVX_Vector *)(dst + (kp / 16) * dst_tile_stride + (kp % 16) * 64) =
+        v[index];
+  }
 }
 
 // Pack row-major W[N,K] to weight Crouton in caller-owned VTCM. A 64-half
@@ -418,26 +341,54 @@ TL_HMX_INLINE void tl_hmx_pack_weight_32x64(__fp16 *dst,
 // every load stays inside the logical row, with no readable padding required.
 // Noncontiguous, unaligned and 32-column remainder layouts retain the scalar
 // path. This is a layout-copy primitive, not a GEMM schedule or worker task.
-TL_HMX_INLINE void tl_hmx_pack_weight_transposed(__fp16 *dst,
-                                                const __fp16 *src, int N, int K,
-                                                int si, int sj) {
-  if (sj == 1 && K % 64 == 0 && si >= K && si % 64 == 0 &&
-      ((uintptr_t)src & 127u) == 0 && ((uintptr_t)dst & 127u) == 0) {
+TL_HMX_INLINE void tl_hmx_pack_weight_transposed_strided_f16(__fp16 *dst,
+                                                             const __fp16 *src,
+                                                             int N, int K,
+                                                             int row_stride,
+                                                             int col_stride) {
+  if (col_stride == 1 && K % 64 == 0 && row_stride >= K &&
+      row_stride % 64 == 0 && ((uintptr_t)src & 127u) == 0 &&
+      ((uintptr_t)dst & 127u) == 0) {
     for (int nt = 0; nt < N / 32; ++nt)
       for (int kc = 0; kc < K / 64; ++kc)
-        tl_hmx_pack_weight_32x64(
+        tl_hmx_pack_transposed_32x64_f16(
             dst + ((size_t)nt * (K / 32) + 2 * kc) * TL_HMX_TILE_ELMS,
-            src + (size_t)nt * 32 * si + kc * 64, si);
+            src + (size_t)nt * 32 * row_stride + kc * 64, row_stride,
+            TL_HMX_TILE_ELMS);
     return;
   }
-  tl_hmx_pack_scalar(dst, src, N, K, K / TL_HMX_T, si, sj, 1);
+  tl_hmx_pack_crouton_scalar_f16(dst, src, N, K, K / TL_HMX_T, row_stride,
+                                 col_stride, 1);
 }
 
-// Layout kinds shared with src/hexagon/op/copy.cc.  Public pack/unpack wrappers
-// lower one logical T.copy.  The row-major endpoint may be a strided DDR/VTCM
+// Pack transposed activation storage [K,M] into activation Crouton [mt,kt].
+// A 32x64 source rectangle contributes two M tiles at the same K tile index.
+// Unaligned, noncontiguous and non-64-wide sources retain the scalar fallback.
+TL_HMX_INLINE void
+tl_hmx_pack_activation_transposed_strided_f16(__fp16 *dst, const __fp16 *src,
+                                              int K, int M, int row_stride,
+                                              int col_stride) {
+  const int k_tiles = K / TL_HMX_T;
+  if (col_stride == 1 && M % 64 == 0 && row_stride >= M &&
+      row_stride % 64 == 0 && ((uintptr_t)src & 127u) == 0 &&
+      ((uintptr_t)dst & 127u) == 0) {
+    for (int mc = 0; mc < M / 64; ++mc)
+      for (int kt = 0; kt < k_tiles; ++kt)
+        tl_hmx_pack_transposed_32x64_f16(
+            dst + ((size_t)(2 * mc) * k_tiles + kt) * TL_HMX_TILE_ELMS,
+            src + (size_t)kt * TL_HMX_T * row_stride + mc * 64, row_stride,
+            (size_t)k_tiles * TL_HMX_TILE_ELMS);
+    return;
+  }
+  tl_hmx_pack_crouton_scalar_f16(dst, src, M, K, k_tiles, col_stride,
+                                 row_stride, 0);
+}
+
+// Layout kinds shared with src/hexagon/op/copy.cc. Public pack/unpack wrappers
+// lower one logical T.copy. The row-major endpoint may be a strided DDR/VTCM
 // matrix region; the Crouton endpoint is always a complete caller-owned VTCM
-// buffer.  A future DMA path can still stage a row-major region before invoking
-// the same strided transform without changing this interface.
+// buffer. A future DMA path can still stage a row-major region before
+// invoking the same strided transform without changing this interface.
 enum {
   TL_HMX_LAYOUT_ACTIVATION = 0,
   TL_HMX_LAYOUT_WEIGHT = 1,
@@ -445,106 +396,117 @@ enum {
   TL_HMX_LAYOUT_WEIGHT_TRANSPOSED = 3,
 };
 
-TL_HMX_INLINE void tl_hexagon_hmx_pack_crouton(__fp16 *dst,
-                                               const __fp16 *src, int rows,
-                                               int cols, int src_stride0,
-                                               int src_stride1,
+TL_HMX_INLINE void tl_hexagon_hmx_pack_crouton(__fp16 *dst, const __fp16 *src,
+                                               int rows, int cols,
+                                               int src_stride0, int src_stride1,
                                                int layout_kind) {
   switch (layout_kind) {
   case TL_HMX_LAYOUT_ACTIVATION:
-    tl_hmx_pack_A_strided(dst, src, rows, cols, src_stride0, src_stride1);
+    tl_hmx_pack_activation_strided_f16(dst, src, rows, cols, src_stride0,
+                                       src_stride1);
     return;
   case TL_HMX_LAYOUT_WEIGHT:
-    tl_hmx_pack_B_strided(dst, src, rows, cols, src_stride0, src_stride1);
+    tl_hmx_pack_weight_strided_f16(dst, src, rows, cols, src_stride0,
+                                   src_stride1);
     return;
   case TL_HMX_LAYOUT_ACTIVATION_TRANSPOSED:
     // Storage is [K,M], while the physical activation coordinates are [M,K].
-    tl_hmx_pack_scalar(dst, src, cols, rows, rows / TL_HMX_T, src_stride1,
-                       src_stride0, 0);
+    tl_hmx_pack_activation_transposed_strided_f16(dst, src, rows, cols,
+                                                  src_stride0, src_stride1);
     return;
   case TL_HMX_LAYOUT_WEIGHT_TRANSPOSED:
     // Storage and physical outer coordinates are both [N,K].
-    tl_hmx_pack_weight_transposed(dst, src, rows, cols, src_stride0, src_stride1);
+    tl_hmx_pack_weight_transposed_strided_f16(dst, src, rows, cols, src_stride0,
+                                              src_stride1);
     return;
   default:
     return;
   }
 }
 
-TL_HMX_INLINE void tl_hexagon_hmx_unpack_crouton(__fp16 *dst,
-                                                 const __fp16 *src, int rows,
-                                                 int cols, int dst_stride0,
+TL_HMX_INLINE void tl_hexagon_hmx_unpack_crouton(__fp16 *dst, const __fp16 *src,
+                                                 int rows, int cols,
+                                                 int dst_stride0,
                                                  int dst_stride1,
                                                  int layout_kind) {
   if (layout_kind == TL_HMX_LAYOUT_ACTIVATION) {
-    tl_hmx_unpack_C_strided(dst, src, rows, cols, dst_stride0, dst_stride1);
+    tl_hmx_unpack_output_strided_f16(dst, src, rows, cols, dst_stride0,
+                                     dst_stride1);
     return;
   }
 
   if (layout_kind == TL_HMX_LAYOUT_WEIGHT) {
-    // Logical dst is B[K,N]; physical B tiles are [nt,kt,cpos(k,n)].
+    // Logical dst is weight[K,N]; physical src tiles are [nt,kt,cpos(k,n)].
     for (int k = 0; k < rows; ++k)
       for (int n = 0; n < cols; ++n)
         dst[(size_t)k * dst_stride0 + (size_t)n * dst_stride1] =
-            src[tl_hmx_off(n, k, rows / TL_HMX_T, 1)];
+            src[tl_hmx_crouton_offset(n, k, rows / TL_HMX_T, 1)];
     return;
   }
 
   if (layout_kind == TL_HMX_LAYOUT_ACTIVATION_TRANSPOSED) {
-    // Logical dst is A_storage[K,M]; physical A coordinates are [m,k].
+    // Logical dst is activation_storage[K,M]; physical src coordinates are
+    // [m,k].
     for (int k = 0; k < rows; ++k)
       for (int m = 0; m < cols; ++m)
         dst[(size_t)k * dst_stride0 + (size_t)m * dst_stride1] =
-            src[tl_hmx_off(m, k, rows / TL_HMX_T, 0)];
+            src[tl_hmx_crouton_offset(m, k, rows / TL_HMX_T, 0)];
     return;
   }
 
   if (layout_kind == TL_HMX_LAYOUT_WEIGHT_TRANSPOSED) {
-    // Logical dst is B_storage[N,K]; physical B coordinates are [nt,kt].
+    // Logical dst is weight_storage[N,K]; physical src coordinates are [nt,kt].
     for (int n = 0; n < rows; ++n)
       for (int k = 0; k < cols; ++k)
         dst[(size_t)n * dst_stride0 + (size_t)k * dst_stride1] =
-            src[tl_hmx_off(n, k, cols / TL_HMX_T, 1)];
+            src[tl_hmx_crouton_offset(n, k, cols / TL_HMX_T, 1)];
   }
 }
 
 // Fused numeric conversion and activation/output layout copy. These primitives
 // visit row pairs, never a GEMM or reduction. Scalar fallback retains arbitrary
 // source/destination strides; full 32-column row pairs use two HVX registers.
-TL_HMX_INLINE void tl_hexagon_hmx_pack_crouton_f32(
-    __fp16 *dst, const float *src, int rows, int cols, int si, int sj, int kind) {
+TL_HMX_INLINE void tl_hexagon_hmx_pack_crouton_f32(__fp16 *dst,
+                                                   const float *src, int rows,
+                                                   int cols, int row_stride,
+                                                   int col_stride, int kind) {
   (void)kind; // Lowering only selects activation/output Crouton (kind 0).
-  if (sj == 1) {
+  if (col_stride == 1) {
     for (int mt = 0; mt < rows / 32; ++mt)
       for (int kt = 0; kt < cols / 32; ++kt)
         for (int pair = 0; pair < 16; ++pair)
           tl_hexagon_hmx_pack_a_f32_pair_k32(
               dst + (size_t)(mt * (cols / 32) + kt) * 1024 + pair * 64,
-              src + (size_t)(mt * 32 + pair * 2) * si + kt * 32,
-              src + (size_t)(mt * 32 + pair * 2 + 1) * si + kt * 32);
+              src + (size_t)(mt * 32 + pair * 2) * row_stride + kt * 32,
+              src + (size_t)(mt * 32 + pair * 2 + 1) * row_stride + kt * 32);
     return;
   }
   for (int r = 0; r < rows; ++r)
     for (int c = 0; c < cols; ++c)
-      dst[tl_hmx_off(r, c, cols / 32, 0)] = (__fp16)src[(size_t)r * si + (size_t)c * sj];
+      dst[tl_hmx_crouton_offset(r, c, cols / 32, 0)] =
+          (__fp16)src[(size_t)r * row_stride + (size_t)c * col_stride];
 }
 
-TL_HMX_INLINE void tl_hexagon_hmx_unpack_crouton_f32(
-    float *dst, const __fp16 *src, int rows, int cols, int si, int sj, int kind) {
+TL_HMX_INLINE void tl_hexagon_hmx_unpack_crouton_f32(float *dst,
+                                                     const __fp16 *src,
+                                                     int rows, int cols,
+                                                     int row_stride,
+                                                     int col_stride, int kind) {
   (void)kind;
-  if (sj == 1) {
+  if (col_stride == 1) {
     for (int mt = 0; mt < rows / 32; ++mt)
       for (int nt = 0; nt < cols / 32; ++nt)
         for (int pair = 0; pair < 16; ++pair)
           tl_hexagon_hmx_unpack_c_f32_pair_n32(
-              dst + (size_t)(mt * 32 + pair * 2) * si + nt * 32,
-              dst + (size_t)(mt * 32 + pair * 2 + 1) * si + nt * 32,
+              dst + (size_t)(mt * 32 + pair * 2) * row_stride + nt * 32,
+              dst + (size_t)(mt * 32 + pair * 2 + 1) * row_stride + nt * 32,
               src + (size_t)(mt * (cols / 32) + nt) * 1024 + pair * 64);
     return;
   }
   for (int r = 0; r < rows; ++r)
     for (int c = 0; c < cols; ++c)
-      dst[(size_t)r * si + (size_t)c * sj] = (float)src[tl_hmx_off(r, c, cols / 32, 0)];
+      dst[(size_t)r * row_stride + (size_t)c * col_stride] =
+          (float)src[tl_hmx_crouton_offset(r, c, cols / 32, 0)];
 }
 
 // Synchronous parallel T.copy: workers partition disjoint 32x32/64 tiles in
@@ -552,14 +514,14 @@ TL_HMX_INLINE void tl_hexagon_hmx_unpack_crouton_f32(
 // but returns only after all stripes are visible. No DMA/HMX ownership, scratch
 // allocation, or operator scheduling is hidden here. The codegen rejects nested
 // pool dispatch; the caller owns both endpoints throughout this copy.
-struct tl_hmx_parallel_copy_args {
+struct tl_hmx_copy_crouton_parallel_args {
   void *dst;
   const void *src;
-  int rows, cols, si, sj, kind, operation;
+  int rows, cols, row_stride, col_stride, kind, operation;
 };
 
-static int tl_hmx_parallel_copy_worker(void *opaque, int wid, int nw) {
-  const auto &a = *static_cast<tl_hmx_parallel_copy_args *>(opaque);
+static int tl_hmx_copy_crouton_parallel_worker(void *opaque, int wid, int nw) {
+  const auto &a = *static_cast<tl_hmx_copy_crouton_parallel_args *>(opaque);
   // Two adjacent K/N tiles preserve the FP16 packer's full-HVX source loads.
   // Partition both axes so short-M, long-K copies can use all workers too.
   const int tc = a.cols % 64 == 0 ? 64 : 32;
@@ -567,84 +529,75 @@ static int tl_hmx_parallel_copy_worker(void *opaque, int wid, int nw) {
   for (int tile = wid; tile < (a.rows / 32) * columns; tile += nw) {
     const int rt = tile / columns, ct = tile % columns;
     const size_t native_offset = (size_t)rt * 32 * a.cols + ct * tc * 32;
-    const size_t row_offset = (size_t)rt * 32 * a.si + (size_t)ct * tc * a.sj;
+    const size_t row_offset =
+        (size_t)rt * 32 * a.row_stride + (size_t)ct * tc * a.col_stride;
     if (a.operation == 0)
       tl_hexagon_hmx_pack_crouton(static_cast<__fp16 *>(a.dst) + native_offset,
-          static_cast<const __fp16 *>(a.src) + row_offset, 32, tc, a.si, a.sj, a.kind);
+                                  static_cast<const __fp16 *>(a.src) +
+                                      row_offset,
+                                  32, tc, a.row_stride, a.col_stride, a.kind);
     else if (a.operation == 1)
       tl_hexagon_hmx_unpack_crouton(static_cast<__fp16 *>(a.dst) + row_offset,
-          static_cast<const __fp16 *>(a.src) + native_offset, 32, tc, a.si, a.sj, a.kind);
+                                    static_cast<const __fp16 *>(a.src) +
+                                        native_offset,
+                                    32, tc, a.row_stride, a.col_stride, a.kind);
     else if (a.operation == 2)
-      tl_hexagon_hmx_pack_crouton_f32(static_cast<__fp16 *>(a.dst) + native_offset,
-          static_cast<const float *>(a.src) + row_offset, 32, tc, a.si, a.sj, a.kind);
+      tl_hexagon_hmx_pack_crouton_f32(
+          static_cast<__fp16 *>(a.dst) + native_offset,
+          static_cast<const float *>(a.src) + row_offset, 32, tc, a.row_stride,
+          a.col_stride, a.kind);
     else
-      tl_hexagon_hmx_unpack_crouton_f32(static_cast<float *>(a.dst) + row_offset,
-          static_cast<const __fp16 *>(a.src) + native_offset, 32, tc, a.si, a.sj, a.kind);
+      tl_hexagon_hmx_unpack_crouton_f32(
+          static_cast<float *>(a.dst) + row_offset,
+          static_cast<const __fp16 *>(a.src) + native_offset, 32, tc,
+          a.row_stride, a.col_stride, a.kind);
   }
   return 0;
 }
 
-TL_HMX_INLINE void tl_hexagon_hmx_copy_crouton_parallel(
-    void *dst, const void *src, int rows, int cols, int si, int sj, int kind,
-    int operation, int workers) {
-  tl_hmx_parallel_copy_args args{dst, src, rows, cols, si, sj, kind, operation};
+TL_HMX_INLINE void
+tl_hexagon_hmx_copy_crouton_parallel(void *dst, const void *src, int rows,
+                                     int cols, int row_stride, int col_stride,
+                                     int kind, int operation, int workers) {
+  tl_hmx_copy_crouton_parallel_args args{
+      dst, src, rows, cols, row_stride, col_stride, kind, operation};
   int nw = tl_num_workers();
-  if (nw > workers) nw = workers;
+  if (nw > workers)
+    nw = workers;
   int tiles = (rows / 32) * (cols / (cols % 64 == 0 ? 64 : 32));
-  if (nw > tiles) nw = tiles;
-  tl_parallel(tl_hmx_parallel_copy_worker, &args, nw);
+  if (nw > tiles)
+    nw = tiles;
+  tl_parallel(tl_hmx_copy_crouton_parallel_worker, &args, nw);
 }
 
-TL_HMX_INLINE void tl_hmx_matmul_tiles(__fp16 *c, const __fp16 *a,
-                                       const __fp16 *b, int M, int N, int K,
-                                       const __fp16 *scales) {
-  int MT = M / TL_HMX_T, NT = N / TL_HMX_T, KT = K / TL_HMX_T;
-  // The HMX accumulator is ONE physical register bank shared by all HW threads,
-  // so the whole clear->MAC->readout sequence must be serialized: hold the unit
-  // spinlock across it.  Uncontended (single-threaded) this is a few cycles; with
-  // the worker pool it serializes the MAC while the HVX pack/unpack run parallel.
-  tl_hmx_unit_acquire();
-  tl_hmx_clear_acc();
-  tl_hmx_set_scales(scales);
-  for (int mt = 0; mt < MT; ++mt)
-    for (int nt = 0; nt < NT; ++nt) {
-      const __fp16 *ar = a + (mt * KT) * TL_HMX_TILE_ELMS;
-      const __fp16 *bc = b + (nt * KT) * TL_HMX_TILE_ELMS;
-      for (int kt = 0; kt < KT; ++kt)
-        tl_hmx_mac_tiles(ar + kt * TL_HMX_TILE_ELMS, bc + kt * TL_HMX_TILE_ELMS,
-                         1);
-      tl_hmx_store_tile(c + (mt * NT + nt) * TL_HMX_TILE_ELMS);
-    }
-  tl_hmx_unit_release();
-}
-
-// Persistent session resources: power/VTCM/HMX are acquired once and held across
-// many matmuls.  The generated FastRPC _open handler calls init; _close calls
-// deinit.  In the per-call (one-shot) path the first matmul inits lazily.
-// NOTE: the check-then-set of these globals is NOT internally synchronized; it is
-// safe because every caller invokes it single-threaded BEFORE tl_parallel spawns
-// workers (so the scales tile is fully written before any worker's MAC reads it).
-// A future persistent/cross-kernel pool that could init from two threads must add
-// a lock here.
+// Persistent session resources: power/VTCM/HMX are acquired once and held
+// across many matmuls. The generated FastRPC _open handler calls init; _close
+// calls deinit. The one-shot runtime also initializes resources before kernel
+// execution. NOTE: the check-then-set of these globals is NOT internally
+// synchronized; it is safe because every caller invokes it single-threaded
+// BEFORE tl_parallel spawns workers. A future persistent/cross-kernel pool that
+// could init from two threads must add a lock here.
 static int tl_hmx_inited;
-static qurt_thread_t tl_hmx_session_tid; // thread whose HMX SHARED enable session_init holds
+static qurt_thread_t
+    tl_hmx_session_tid; // thread whose HMX SHARED enable session_init holds
 static void tl_hmx_session_init(void) {
   if (tl_hmx_inited)
     return;
   tl_hmx_power_setup();
   tl_hmx_vtcm_setup();
   tl_hmx_setup();
-  // Require BOTH the VTCM grant AND a successful per-thread HMX enable (which needs
-  // the ctx from tl_hmx_setup): otherwise tear everything down so tl_hmx_session_ok()
-  // reports failure loudly, rather than marking the session ready while enable was a
-  // silent no-op (ctx==0) and every later MAC runs with HMX never locked.
+  // Require BOTH the VTCM grant AND a successful per-thread HMX enable (which
+  // needs the ctx from tl_hmx_setup): otherwise tear everything down so
+  // tl_hmx_session_ok() reports failure loudly, rather than marking the session
+  // ready while enable was a silent no-op (ctx==0) and every later MAC runs
+  // with HMX never locked.
   if (tl_vtcm_base_ptr && tl_hmx_enable() == 0) {
-    // The HMX output scales are constant (unit scale / zero bias) and live in the
-    // reserved first VTCM tile (base+0); fill them once here rather than on every
-    // gemm call.  The gemm/matmul entries read them from base+0.  The accumulator
-    // spinlock is NOT held here — it is taken per-MAC inside tl_hmx_matmul_tiles.
+    // Initialize the reserved scale tile consistently with the embedding
+    // bridge. Explicit atoms use their DSL-provided bias buffers and
+    // accumulator locks.
     tl_hmx_fill_unit_scales((uint32_t *)tl_vtcm_base_ptr);
-    tl_hmx_session_tid = qurt_thread_get_id(); // this enable is bound to this thread
+    tl_hmx_session_tid =
+        qurt_thread_get_id(); // this enable is bound to this thread
     tl_hmx_inited = 1;
   } else {
     // VTCM acquire failed: release the HMX ctx and drop the rail off TURBO so a
@@ -664,76 +617,21 @@ static void tl_hmx_session_deinit(void) {
   tl_hmx_inited = 0;
 }
 
-// Did the session actually acquire VTCM/HMX?  The FastRPC _open uses this to
-// fail loudly when (e.g.) a leaked agent still holds VTCM — otherwise the matmul
-// returns -2, the generated kernel discards the rc, and the caller gets zeros.
+// Let the FastRPC runtime reject execution if VTCM/HMX acquisition failed.
 static int tl_hmx_session_ok(void) { return tl_hmx_inited; }
 
-// T.gemm (Level-1) entry: operands are ROW-MAJOR in VTCM (loaded by a fast,
-// auto-vectorized T.copy).  HVX-pack them to a Crouton scratch, MAC, then HVX-
-// unpack the result back to row-major C — so the surrounding copies AND elementwise
-// ops (softmax) stay vectorizable.  The Crouton scratch grows TOP-DOWN from the end
-// of VTCM while the row-major alloc_shared tiles grow bottom-up.  A Crouton tile
-// holds the same element count as its row-major source, so the scratch is the SAME
-// size as the operands and the two together need ~2x the operand bytes — a flat
-// "scratch fits in VTCM" check is NOT enough.  We refuse (-3) if the scratch base
-// would underflow into the live shared tiles: the codegen publishes their bottom
-// high-water (tl_vtcm_shared_high_water), which covers the operands AND any sibling
-// alloc_shared buffers, rather than silently corrupt them.
-// trans_a/trans_b: operand stored transposed ([K,M] / [N,K]), scalar transposed
-// pack.  Returns 0 on ok.
-static int tl_hexagon_hmx_gemm(__fp16 *C, const __fp16 *A, const __fp16 *B, int M,
-                               int N, int K, int trans_a, int trans_b) {
-  if (M <= 0 || N <= 0 || K <= 0 || (M % TL_HMX_T) || (N % TL_HMX_T) ||
-      (K % TL_HMX_T))
-    return -1;
-  tl_hmx_session_init(); // power + HMX lock + ensure VTCM (all idempotent)
-  if (!tl_vtcm_base_ptr)
-    return -2;
-  size_t a_sz = (size_t)(M / TL_HMX_T) * (K / TL_HMX_T) * TL_HMX_TILE_ELMS;
-  size_t b_sz = (size_t)(N / TL_HMX_T) * (K / TL_HMX_T) * TL_HMX_TILE_ELMS;
-  size_t c_sz = (size_t)(M / TL_HMX_T) * (N / TL_HMX_T) * TL_HMX_TILE_ELMS;
-  // Arena top, floored to a 2KB Crouton tile so the scratch tiles stay 128-byte
-  // (HVX) aligned even if the granted VTCM total isn't tile-aligned.
-  size_t top = (size_t)tl_vtcm_total & ~(size_t)(TL_HMX_TILE_BYTES - 1);
-  __fp16 *c_t = (__fp16 *)(tl_vtcm_base_ptr + top) - c_sz;
-  __fp16 *b_t = c_t - b_sz;
-  __fp16 *a_t = b_t - a_sz;
-  // Refuse if the scratch base would underflow into the live shared tiles.  The
-  // codegen-published bottom high-water covers the operands and any sibling
-  // alloc_shared buffers; the scale tile at base+0 is always reserved.  Catches the
-  // large gemm the old scratch-only check missed (e.g. M=N=K>=864 on 8MB VTCM,
-  // where operands+scratch exceed VTCM though the scratch alone fits).
-  const uint8_t *floor = tl_vtcm_base_ptr + tl_vtcm_shared_high_water;
-  if (floor < tl_vtcm_base_ptr + TL_HMX_TILE_BYTES)
-    floor = tl_vtcm_base_ptr + TL_HMX_TILE_BYTES;
-  if ((const uint8_t *)a_t < floor)
-    return -3;
-  if (trans_a)
-    tl_hmx_pack_A_T(a_t, A, M, K);
-  else
-    tl_hmx_pack_A(a_t, A, M, K);
-  if (trans_b)
-    tl_hmx_pack_B_T(b_t, B, K, N);
-  else
-    tl_hmx_pack_B(b_t, B, K, N);
-  // Scales were filled once in tl_hmx_session_init, in the reserved base+0 tile.
-  tl_hmx_matmul_tiles(c_t, a_t, b_t, M, N, K, (const __fp16 *)tl_vtcm_base_ptr);
-  tl_hmx_unpack_C(C, c_t, M, N);
-  return 0;
-}
-
-// ---- explicit HMX atoms: the DSL owns the K-loop and Crouton storage ---------
-// These thin wrappers expose the accumulator protocol one instruction at a time.
-// A DSL kernel decides where dequantization sits relative to clear/MAC/convert/
-// store and owns every Crouton buffer through alloc_shared. TILE = 32; one tile
-// is 1024 fp16 = 2 KB. On one Q6 thread, a source tile is reusable after its
-// final multiply packet; accumulator convert and output store do not access A/W.
-// `tl_hexagon_hmx` prefix so _fastrpc.py pulls in this header.
+// ---- explicit HMX atoms: the DSL owns the K-loop and Crouton storage
+// --------- These thin wrappers expose the accumulator protocol one instruction
+// at a time. A DSL kernel decides where dequantization sits relative to
+// clear/MAC/convert/ store and owns every Crouton buffer through alloc_shared.
+// TILE = 32; one tile is 1024 fp16 = 2 KB. On one Q6 thread, a source tile is
+// reusable after its final multiply packet; accumulator convert and output
+// store do not access A/W. `tl_hexagon_hmx` prefix so _fastrpc.py pulls in this
+// header.
 //
-// The atom wrappers retain the dependency-only TIR state tokens as C parameters.
-// Hardware state remains implicit; the tokens only expose ordering and
-// ownership to compiler analyses.
+// The atom wrappers retain the dependency-only TIR state tokens as C
+// parameters. Hardware state remains implicit; the tokens only expose ordering
+// and ownership to compiler analyses.
 TL_HMX_INLINE void tl_hexagon_hmx_acc_acquire(void *acc_state) {
   (void)acc_state;
   tl_hmx_unit_acquire();
@@ -757,8 +655,7 @@ TL_HMX_INLINE void tl_hexagon_hmx_mma_atom(void *acc_state,
   (void)acc_state;
   tl_hmx_mac_tiles(activation, weight, 1);
 }
-TL_HMX_INLINE void tl_hexagon_hmx_convert_acc(void *cvt_state,
-                                              void *acc_state,
+TL_HMX_INLINE void tl_hexagon_hmx_convert_acc(void *cvt_state, void *acc_state,
                                               void *bias_state,
                                               const void *bias_source,
                                               int mode) {
@@ -770,9 +667,9 @@ TL_HMX_INLINE void tl_hexagon_hmx_convert_acc(void *cvt_state,
   (void)bias_source;
   tl_hmx_convert_acc(mode);
 }
-TL_HMX_INLINE void tl_hexagon_hmx_store_cvt_state(
-    void *cvt_state, __fp16 *output, void *acc_state, void *bias_state,
-    const void *bias_source) {
+TL_HMX_INLINE void
+tl_hexagon_hmx_store_cvt_state(void *cvt_state, __fp16 *output, void *acc_state,
+                               void *bias_state, const void *bias_source) {
   (void)cvt_state;
   (void)acc_state;
   (void)bias_state;
@@ -780,147 +677,4 @@ TL_HMX_INLINE void tl_hexagon_hmx_store_cvt_state(
   // Conversion is a separate TileLang atom. This instruction only transfers
   // the explicit HMX convert-state token to its Crouton VTCM destination.
   tl_hmx_store_cvt(output);
-}
-
-// Legacy streaming helpers kept for source compatibility.  New kernels use
-// the stateful atom wrappers above and keep session ownership in the runtime.
-TL_HMX_INLINE void tl_hexagon_hmx_open(void) {
-  tl_hmx_session_init();                              // idempotent: power/VTCM/HMX + unit scales @ base+0
-  tl_hmx_unit_acquire();
-  tl_hmx_set_scales((const void *)tl_vtcm_base_ptr);  // unit scales @ base+0
-}
-TL_HMX_INLINE void tl_hexagon_hmx_clear(void) { tl_hmx_clear_acc(); }
-TL_HMX_INLINE void tl_hexagon_hmx_mac(const __fp16 *a_tile, const __fp16 *b_tile) {
-  tl_hmx_mac_tiles(a_tile, b_tile, 1);
-}
-TL_HMX_INLINE void tl_hexagon_hmx_store(__fp16 *c_tile) { tl_hmx_store_tile(c_tile); }
-TL_HMX_INLINE void tl_hexagon_hmx_close(void) { tl_hmx_unit_release(); }
-// Pack helpers (row-major fp16 -> Crouton), exposed for the DSL streaming path.
-TL_HMX_INLINE void tl_hexagon_hmx_pack_a(__fp16 *t, const __fp16 *A, int M, int K) {
-  tl_hmx_pack_A(t, A, M, K);
-}
-TL_HMX_INLINE void tl_hexagon_hmx_pack_b(__fp16 *t, const __fp16 *B, int K, int N) {
-  tl_hmx_pack_B(t, B, K, N);
-}
-TL_HMX_INLINE void tl_hexagon_hmx_unpack_c(__fp16 *C, const __fp16 *t, int M, int N) {
-  tl_hmx_unpack_C(C, t, M, N);
-}
-
-// Worker-pool T.gemm: like tl_hexagon_hmx_gemm, but the Crouton scratch is carved
-// TOP-DOWN from `region_end` (the top of THIS worker's VTCM slice) and must stay
-// above `op_floor` (this worker's operand high-water), so concurrent workers' gemms
-// use DISJOINT scratch.  The HVX pack/unpack run in parallel (each worker's own
-// scratch); only the HMX MAC serializes on the accumulator spinlock.  Operands are
-// row-major in the worker's slice; scales are the shared base+0 tile.  The session
-// (power/VTCM/HMX acquire + scales) is already up from _open, and each worker has
-// enabled HMX for its own thread before calling this.  Returns 0 on ok.
-static int tl_hexagon_hmx_gemm_mt(__fp16 *C, const __fp16 *A, const __fp16 *B,
-                                  int M, int N, int K, int trans_a, int trans_b,
-                                  void *region_end, void *op_floor) {
-  if (M <= 0 || N <= 0 || K <= 0 || (M % TL_HMX_T) || (N % TL_HMX_T) ||
-      (K % TL_HMX_T))
-    return -1;
-  if (!tl_vtcm_base_ptr)
-    return -2;
-  size_t a_sz = (size_t)(M / TL_HMX_T) * (K / TL_HMX_T) * TL_HMX_TILE_ELMS;
-  size_t b_sz = (size_t)(N / TL_HMX_T) * (K / TL_HMX_T) * TL_HMX_TILE_ELMS;
-  size_t c_sz = (size_t)(M / TL_HMX_T) * (N / TL_HMX_T) * TL_HMX_TILE_ELMS;
-  // Scratch grows down from this worker's region top (floored to a 2KB tile so the
-  // HVX scratch accesses stay 128-byte aligned).
-  uintptr_t top = (uintptr_t)region_end & ~(uintptr_t)(TL_HMX_TILE_BYTES - 1);
-  __fp16 *c_t = (__fp16 *)top - c_sz;
-  __fp16 *b_t = c_t - b_sz;
-  __fp16 *a_t = b_t - a_sz;
-  if ((const uint8_t *)a_t < (const uint8_t *)op_floor)
-    return -3; // scratch would underflow into this worker's live operands
-  if (trans_a)
-    tl_hmx_pack_A_T(a_t, A, M, K);
-  else
-    tl_hmx_pack_A(a_t, A, M, K);
-  if (trans_b)
-    tl_hmx_pack_B_T(b_t, B, K, N);
-  else
-    tl_hmx_pack_B(b_t, B, K, N);
-  tl_hmx_matmul_tiles(c_t, a_t, b_t, M, N, K, (const __fp16 *)tl_vtcm_base_ptr);
-  tl_hmx_unpack_C(C, c_t, M, N);
-  return 0;
-}
-
-// Public entry called by generated kernels (the call_extern matmul path), where
-// A/B/C are GLOBAL (DDR rpcmem) rather than VTCM-resident.  Identical to the
-// T.gemm path with no transpose, so it just delegates: the bottom high-water is 0
-// (no alloc_shared tiles), leaving the whole VTCM free for the top-down scratch.
-// Acquires the session lazily if _open didn't; teardown belongs to _close.
-static int tl_hexagon_hmx_matmul_f16(__fp16 *C, const __fp16 *A,
-                                     const __fp16 *B, int M, int N, int K) {
-  tl_vtcm_shared_high_water = 0;
-  return tl_hexagon_hmx_gemm(C, A, B, M, N, K, 0, 0);
-}
-
-// Benchmark variant: acquire + Crouton-pack once, then time `iters` HMX matmuls
-// (the matrix-engine compute only, excluding setup/pack/unpack), and write
-// timing[0] = microseconds/iter, timing[1] = GFLOPS.  C holds the correct
-// result of the final iteration.  Measured on the DSP via qtimer, so the
-// number reflects on-device compute, not the adb/RPC round trip.
-static int tl_hexagon_hmx_matmul_f16_bench(__fp16 *C, const __fp16 *A,
-                                           const __fp16 *B, int M, int N, int K,
-                                           int iters, float *timing) {
-  if (iters < 1)
-    iters = 1;
-  if (M <= 0 || N <= 0 || K <= 0 || (M % TL_HMX_T) || (N % TL_HMX_T) ||
-      (K % TL_HMX_T))
-    return -1;
-
-  tl_hmx_power_setup();
-  tl_hmx_vtcm_setup();
-  tl_hmx_setup();
-  if (!tl_vtcm_base_ptr) {
-    tl_hmx_reset();
-    tl_hmx_vtcm_reset();
-    tl_hmx_power_reset();
-    return -2;
-  }
-
-  size_t a_sz = (size_t)(M / TL_HMX_T) * (K / TL_HMX_T) * TL_HMX_TILE_ELMS;
-  size_t b_sz = (size_t)(N / TL_HMX_T) * (K / TL_HMX_T) * TL_HMX_TILE_ELMS;
-  size_t c_sz = (size_t)(M / TL_HMX_T) * (N / TL_HMX_T) * TL_HMX_TILE_ELMS;
-  if ((a_sz + b_sz + c_sz) * sizeof(__fp16) + 256u > (size_t)tl_vtcm_total) {
-    tl_hmx_reset();
-    tl_hmx_vtcm_reset();
-    tl_hmx_power_reset();
-    return -3;
-  }
-  __fp16 *a_t = (__fp16 *)tl_vtcm_base_ptr;
-  __fp16 *b_t = a_t + a_sz;
-  __fp16 *c_t = b_t + b_sz;
-  uint32_t *scales = (uint32_t *)(c_t + c_sz);
-  tl_hmx_fill_unit_scales(scales);
-
-  tl_hmx_enable();
-  tl_hmx_pack_A(a_t, A, M, K);
-  tl_hmx_pack_B(b_t, B, K, N);
-
-  unsigned long long t0 = HAP_perf_get_qtimer_count();
-  for (int it = 0; it < iters; ++it)
-    tl_hmx_matmul_tiles(c_t, a_t, b_t, M, N, K, (const __fp16 *)scales);
-  unsigned long long t1 = HAP_perf_get_qtimer_count();
-
-  tl_hmx_unpack_C(C, c_t, M, N);
-  tl_hmx_disable();
-  tl_hmx_reset();
-  tl_hmx_vtcm_reset();
-  tl_hmx_power_reset();
-
-  double total_us = (double)HAP_perf_qtimer_count_to_us(t1 - t0);
-  double us = total_us / (double)iters;
-  double gflops = (us > 0.0)
-                      ? (2.0 * (double)M * (double)N * (double)K) / (us * 1000.0)
-                      : 0.0;
-  if (timing) {
-    timing[0] = (float)us;
-    timing[1] = (float)gflops;
-  }
-  FARF(ALWAYS, "HMX bench %dx%dx%d x%d iters: %.3f us/iter, %.1f GFLOPS", M, N, K,
-       iters, us, gflops);
-  return 0;
 }

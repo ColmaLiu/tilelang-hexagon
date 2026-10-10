@@ -146,7 +146,7 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
   this->InitFuncState(f);
   ReserveKeywordsAsUnique();
   // Reserve the first 2KB VTCM tile (offset 0) for the HMX output scales that
-  // tl_hexagon_hmx_gemm writes at tl_vtcm_base()+0; alloc_shared buffers start
+  // the session/bridge initializes at tl_vtcm_base()+0; alloc_shared buffers start
   // above it, so operands and scales can never overlap regardless of the runtime
   // VTCM size.  (Non-HMX shared kernels just leave the first tile unused.)
   vtcm_offset_ = 2048;
@@ -240,12 +240,9 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
   std::string name = static_cast<std::string>(global_symbol.value());
 
   if (wp_num_workers_ > 0) {
-    // Pre-pass: size each worker's private VTCM region.  It holds the alloc_shared
-    // operands at the bottom (wp_operand_bytes_) and the HMX gemm's Crouton scratch
-    // at the top (wp_gemm_scratch_, max over gemms — scratch is reused per gemm), so
-    // wp_stride_ = operands + scratch and worker w owns [2048+w*stride, 2048+(w+1)*stride).
+    // Pre-pass: size each worker's private alloc_shared region. Explicit HMX
+    // atoms and layout copies use these buffers without hidden GEMM scratch.
     wp_operand_bytes_ = 0;
-    wp_gemm_scratch_ = 0;
     wp_uses_hmx_ = false;
     tirx::PostOrderVisit(f->body, [&](const ffi::ObjectRef &node) {
       if (const auto *a = node.as<AllocBufferNode>()) {
@@ -268,30 +265,9 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
         if (IsHexagonHMXIntrinsic(call)) {
           wp_uses_hmx_ = true;
         }
-        // T.gemm->HMX lowers to tl_hexagon_hmx_gemm(C,A,B,M,N,K,ta,tb); it needs
-        // Crouton scratch (a_sz+b_sz+c_sz tiles) in this worker's region — size it
-        // from M=args[4]/N=args[5]/K=args[6] and keep the max.
-        if (!call->args.empty()) {
-          if (const auto *s = call->args[0].as<StringImmNode>()) {
-            if (s->value == "tl_hexagon_hmx_gemm") {
-              wp_uses_hmx_ = true;
-              auto cdim = [&](size_t i) -> size_t {
-                const auto *imm = call->args[i].as<IntImmNode>();
-                ICHECK(imm) << "worker-pool T.gemm requires static M/N/K";
-                return static_cast<size_t>(imm->value);
-              };
-              size_t M = cdim(4), N = cdim(5), K = cdim(6);
-              size_t tiles = (M / 32) * (K / 32) + (N / 32) * (K / 32) +
-                             (M / 32) * (N / 32);
-              size_t sc_bytes = tiles * 1024u * 2u; // tile elems * sizeof(fp16)
-              if (sc_bytes > wp_gemm_scratch_)
-                wp_gemm_scratch_ = sc_bytes;
-            }
-          }
-        }
       }
     });
-    wp_stride_ = wp_operand_bytes_ + wp_gemm_scratch_;
+    wp_stride_ = wp_operand_bytes_;
     // (1) args struct: one plain field per kernel parameter.
     stream << "typedef struct {\n";
     for (size_t i = 0; i < f->params.size(); ++i) {
@@ -457,11 +433,8 @@ void CodeGenTileLangHexagon::VisitStmt_(const AllocBufferNode *op) {
       stream << " + (size_t)tl_wid * " << wp_stride_ << "u";
     }
     stream << ");\n";
-    // Publish the running bottom high-water so a top-down VTCM consumer (the HMX
-    // gemm scratch) won't overlap this (and prior) live shared tiles.  Skipped in
-    // worker-pool mode: the per-worker gemm (tl_hexagon_hmx_gemm_mt) uses the
-    // codegen-passed op_floor for its own slice, not this global high-water, so the
-    // value is unused there and would be a racy cross-worker write.
+    // Publish static VTCM usage for embedding/export capacity checks. Worker
+    // kernels use their private region stride and must not write shared metadata.
     if (!wp_emit_) {
       this->PrintIndent();
       stream << "tl_vtcm_shared_high_water = " << vtcm_offset_ << "u;\n";
@@ -514,31 +487,10 @@ void CodeGenTileLangHexagon::VisitExpr_(const CallNode *op,
     return;
   }
 
-  // In a worker-pool kernel a T.gemm (tl_hexagon_hmx_gemm) is REWRITTEN to the
-  // region-aware tl_hexagon_hmx_gemm_mt so its Crouton scratch lives in THIS
-  // worker's VTCM slice (the plain entry carves from the global VTCM top, which
-  // would collide across workers). Scratch-free Crouton pack/unpack calls are
-  // emitted unchanged; other tl_hexagon_hmx* externs are rejected loudly.
+  // Layout-copy externs operate on caller-owned buffers. Stateful HMX atoms
+  // are handled above; other HMX externs are unsupported inside worker kernels.
   if (wp_emit_ && !op->args.empty()) {
     if (const auto *s = op->args[0].as<StringImmNode>()) {
-      if (s->value == "tl_hexagon_hmx_gemm") {
-        // Rewrite T.gemm to the region-aware worker variant: its Crouton scratch
-        // lives in THIS worker's VTCM slice, not the global top, so concurrent
-        // workers' gemms don't collide.  Append the worker's region end and operand
-        // floor (region = [2048+wid*stride, 2048+(wid+1)*stride), operands fill the
-        // bottom wp_operand_bytes_, scratch the rest).
-        os << "tl_hexagon_hmx_gemm_mt(";
-        for (size_t i = 1; i < op->args.size(); ++i) { // C,A,B,M,N,K,ta,tb
-          if (i > 1)
-            os << ", ";
-          os << PrintExpr(op->args[i]);
-        }
-        os << ", (char*)tl_vtcm_base() + 2048u + (size_t)(tl_wid + 1) * "
-           << wp_stride_ << "u"; // region_end (top of this worker's slice)
-        os << ", (char*)tl_vtcm_base() + 2048u + (size_t)tl_wid * " << wp_stride_
-           << "u + " << wp_operand_bytes_ << "u)"; // op_floor (operand high-water)
-        return;
-      }
       // Crouton pack/unpack only transforms caller-owned buffers inside this
       // worker's VTCM slice. They have no global scratch and are safe as-is.
       if (s->value == "tl_hexagon_hmx_pack_crouton" ||
@@ -553,8 +505,8 @@ void CodeGenTileLangHexagon::VisitExpr_(const CallNode *op,
       if (s->value.find("tl_hexagon_hmx") == 0) {
         LOG(FATAL) << "CodeGenTileLangHexagon: this HMX call inside a "
                       "hexagon.num_workers kernel is unsupported — only "
-                      "scratch-free Crouton copy helpers and T.gemm "
-                      "(tl_hexagon_hmx_gemm) are worker-safe.";
+                      "scratch-free Crouton copy helpers and stateful HMX "
+                      "intrinsics are worker-safe.";
       }
       if (s->value.find("tl_hexagon_dma_") == 0) {
         LOG(FATAL) << "CodeGenTileLangHexagon: DMA calls inside a "
