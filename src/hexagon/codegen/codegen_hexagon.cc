@@ -187,8 +187,6 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
     dma_capacity_ = static_cast<int>(capacity.value()->value);
   }
   if (dma_async_) {
-    ICHECK_EQ(wp_num_workers_, 0)
-        << "Hexagon async DMA does not support worker pools";
     ICHECK(!raw_dma)
         << "Hexagon async DMA cannot share a kernel with raw DMA calls";
     name_supply_->ReserveName("tl_dma_async");
@@ -313,6 +311,13 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
       CodeGenC::PrintType(GetType(f->params[i]), stream);
       stream << " " << pvids[i] << " = tl_a->" << pvids[i] << ";\n";
     }
+    if (dma_async_) {
+      // The descriptors and FIFO belong to this invocation of the worker, just
+      // like its private VTCM slice. Never share a queue between callbacks.
+      stream << "  tl_hexagon_dma_async_context<" << dma_capacity_
+             << "> tl_dma_async;\n";
+      stream << "  if (tl_dma_async.status != TL_OK) return TL_ERR_DMA;\n";
+    }
     if (wp_uses_hmx_) {
       // Each worker enables HMX for its OWN thread (per-thread SHARED lock), except
       // the session thread (worker 0 / inline fallback) which session_init already
@@ -322,12 +327,16 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
       // fails; the nonzero code is OR-reduced by tl_parallel into the entry's
       // return, so the host sees a clean failure instead of partial output.
       stream << "  if (tl_en && tl_hmx_enable() != 0) return TL_ERR_HMX;\n";
+      if (dma_async_)
+        stream << "  if (tl_en) tl_dma_async.disable_hmx = tl_hmx_disable;\n";
     }
     this->PreFunctionBody(f);
     wp_emit_ = true;
     wp_outermost_pending_ = true;
     int worker_scope = this->BeginScope();
     this->PrintStmt(f->body);
+    if (dma_async_)
+      stream << "  if (tl_dma_async.wait(0) != TL_OK) return TL_ERR_DMA;\n";
     this->EndScope(worker_scope);
     wp_emit_ = false;
     // The body must have contained a blockIdx.x loop for the stride to attach to;
@@ -337,7 +346,7 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
         << "CodeGenTileLangHexagon: a hexagon.num_workers kernel must have a "
            "blockIdx.x grid loop to distribute across workers, but none was found.";
     wp_outermost_pending_ = false;
-    if (wp_uses_hmx_)
+    if (wp_uses_hmx_ && !dma_async_)
       stream << "  if (tl_en) tl_hmx_disable();\n";
     stream << "  return TL_OK;\n";
     stream << "}\n";
@@ -533,10 +542,14 @@ void CodeGenTileLangHexagon::VisitExpr_(const CallNode *op,
       // Crouton pack/unpack only transforms caller-owned buffers inside this
       // worker's VTCM slice. They have no global scratch and are safe as-is.
       if (s->value == "tl_hexagon_hmx_pack_crouton" ||
-          s->value == "tl_hexagon_hmx_unpack_crouton") {
+          s->value == "tl_hexagon_hmx_unpack_crouton" ||
+          s->value == "tl_hexagon_hmx_pack_crouton_f32" ||
+          s->value == "tl_hexagon_hmx_unpack_crouton_f32") {
         CodeGenC::VisitExpr_(op, os);
         return;
       }
+      ICHECK(s->value != "tl_hexagon_hmx_copy_crouton_parallel")
+          << "hexagon.copy_workers cannot nest inside a num_workers kernel";
       if (s->value.find("tl_hexagon_hmx") == 0) {
         LOG(FATAL) << "CodeGenTileLangHexagon: this HMX call inside a "
                       "hexagon.num_workers kernel is unsupported — only "
@@ -566,7 +579,7 @@ void CodeGenTileLangHexagon::VisitStmt_(const EvaluateNode *op) { // NOLINT(*)
     return;
   }
   if (call && (IsHexagonAsyncCopy(call) || IsDMAWait(call))) {
-    ICHECK(dma_async_ && !wp_emit_);
+    ICHECK(dma_async_);
     PrintIndent();
     stream << "if (tl_dma_async.";
     if (IsDMAWait(call)) {

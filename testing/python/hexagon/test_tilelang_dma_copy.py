@@ -101,9 +101,14 @@ def test_reject_invalid_wait_argument(pending):
         T.dma_wait(pending)
 
 
-def test_reject_worker_pool():
-    with pytest.raises(Exception, match='worker pools'):
-        lower(make_capacity_probe(2, workers=2))
+def test_managed_worker_queue_is_local_and_drained():
+    source = lower(make_capacity_probe(2, workers=2))
+    callback, entry = source.split('int32_t probe_kernel(')
+    assert 'static int probe_kernel_worker' in callback
+    assert 'tl_hexagon_dma_async_context<2> tl_dma_async;' in callback
+    assert 'tl_hexagon_dma_async_context' not in entry
+    assert 'tl_wid *' in callback or '* tl_wid' in callback
+    assert callback.rindex('tl_dma_async.wait(0)') > callback.rindex('tl_dma_async.copy_1d(')
 
 
 def test_reject_crouton_async():
@@ -182,6 +187,60 @@ def test_async_hmx_error_cleanup_is_armed_and_disarmed():
     source = lower(example('example_dma_hmx_matmul').make_dma_hmx_matmul())
     assert 'tl_dma_async.release_hmx = tl_hmx_unit_release;' in source
     assert 'tl_dma_async.release_hmx = nullptr;' in source
+
+
+def make_hmx_probe():
+    e = HMXIntrinEmitter(32, 32, 64)
+
+    @T.prim_func
+    def dma_hmx_workers(A: T.Tensor((13 * 32, 64), "float16"),
+                        B: T.Tensor((64, 32), "float16"),
+                        Fail: T.Tensor((1,), "int32"),
+                        C: T.Tensor((13 * 32, 32), "float16")):
+        T.func_attr({"hexagon.dma_queue_capacity": 2})
+        with T.Kernel(13, threads=1, num_workers=6) as group:
+            ar = T.alloc_shared((32, 64), "float16")
+            br = T.alloc_shared((64, 32), "float16")
+            an = T.alloc_shared((32, 64), "float16")
+            bn = T.alloc_shared((64, 32), "float16")
+            cn = T.alloc_shared((32, 32), "float16")
+            config = T.alloc_shared((64,), "uint32")
+            acc = T.alloc_hmx_accumulator()
+            cvt = T.alloc_hmx_convert_state()
+            bias = T.alloc_hmx_bias_state()
+            T.annotate_layout({an: e.activation_layout(an), bn: e.weight_layout(bn),
+                               cn: e.output_layout(cn)})
+            for i in T.serial(32):
+                config[i] = T.uint32(0x3c00)
+                config[i + 32] = T.uint32(0)
+            T.dma_copy(A[group * 32:(group + 1) * 32, :], ar)
+            T.dma_copy(B, br)
+            T.dma_wait()
+            T.copy(ar, an)
+            T.copy(br, bn)
+            e.acquire(acc)
+            if Fail[0] != 0:
+                # Deliberate FIFO overflow while holding HMX. The two accepted
+                # transfers must finish, and unit/thread leases must be freed.
+                T.dma_copy(A[group * 32:(group + 1) * 32, :], ar)
+                T.dma_copy(B, br)
+                T.dma_copy(B, br)
+            e.load_bias(bias, config)
+            e.clear(acc)
+            for k in T.serial(2):
+                e.mma_atom(acc, an, bn, 0, 0, k)
+            e.convert(cvt, acc, bias, config)
+            e.store(cvt, acc, cn, bias, config, 0, 0)
+            e.release(acc)
+            T.copy(cn, C[group * 32:(group + 1) * 32, :])
+    return dma_hmx_workers
+
+
+def test_worker_hmx_thread_cleanup_survives_dma_errors():
+    source = lower(make_hmx_probe())
+    assert 'if (tl_en) tl_dma_async.disable_hmx = tl_hmx_disable;' in source
+    assert 'tl_dma_async.release_hmx = tl_hmx_unit_release;' in source
+    assert 'if (tl_en) tl_hmx_disable();' not in source
 
 
 def test_async_scalar_access_is_not_silently_synchronous():

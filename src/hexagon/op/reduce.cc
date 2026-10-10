@@ -8,10 +8,10 @@
  * map half is the elementwise HVX vectorizer in the codegen.
  *
  * Only the shapes softmax/layernorm need are handled (2D src, reduce dim=1,
- * clear=True, fp16 src, fp32 dst); anything else errors clearly rather than
+ * clear=True, fp16/fp32 src, fp32 dst); anything else errors clearly rather than
  * silently falling back to a GPU-shaped lowering Hexagon can't run.  The runtime
  * helper uses HVX for aligned row spans and scalar tails/fallbacks otherwise, so
- * non-64-multiple row widths stay correct.
+ * arbitrary positive row widths stay correct.
  */
 
 #include "op/reduce.h"
@@ -44,8 +44,9 @@ struct Reduce {
     ICHECK(op.clear)
         << "Hexagon reduce supports clear=True only; combine with a running "
            "value in scalar code (e.g. m = max(m, rowmax(S))).";
-    ICHECK(op.src->dtype == DataType::Float(16))
-        << "Hexagon reduce supports fp16 source only; got " << op.src->dtype;
+    const bool fp32_source = op.src->dtype == DataType::Float(32);
+    ICHECK(op.src->dtype == DataType::Float(16) || fp32_source)
+        << "Hexagon reduce supports fp16/fp32 source only; got " << op.src->dtype;
     ICHECK(op.dst->dtype == DataType::Float(32))
         << "Hexagon reduce writes an fp32 result; declare the destination "
            "float32 (got "
@@ -70,15 +71,15 @@ struct Reduce {
 
     const char *fn = nullptr;
     if (op.type->isMax())
-      fn = "tl_hvx_rowmax_mat";
+      fn = fp32_source ? "tl_hvx_rowmax_mat_f32" : "tl_hvx_rowmax_mat_f16";
     else if (op.type->isSum())
-      fn = "tl_hvx_rowsum_mat";
+      fn = fp32_source ? "tl_hvx_rowsum_mat_f32" : "tl_hvx_rowsum_mat_f16";
     else
       ICHECK(false) << "Hexagon reduce supports max/sum only.";
 
     PrimExpr src_ptr = MakeAccessPtrFromRegion(op.srcRegion_, 1); // read
     PrimExpr dst_ptr = MakeAccessPtrFromRegion(op.dstRegion_, 2); // write
-    // primitive signature: (float* out, const __fp16* in, int rows, int n)
+    // Both primitives write fp32; the input type follows the source dtype.
     Array<PrimExpr> args = {StringImm(fn), dst_ptr, src_ptr, src_extents[0],
                             src_extents[1]};
     return Evaluate(Call(DataType::Int(32), builtin::call_extern(), args));

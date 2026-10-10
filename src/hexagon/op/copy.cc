@@ -79,11 +79,13 @@ MatchHMXLayout(const Buffer &buffer, const Layout &layout,
       {HMXLayoutKind::kWeight,
        (floordiv(col, 32) * row_tiles + floordiv(row, 32)) * 1024 +
            normal},
-      {HMXLayoutKind::kActivationTransposed,
-       (floordiv(col, 32) * row_tiles + floordiv(row, 32)) * 1024 +
-           transposed},
+      // Prefer the row-tile-major representation when a single tile along an
+      // axis makes the two transposed layouts physically equivalent.
       {HMXLayoutKind::kWeightTransposed,
        (floordiv(row, 32) * col_tiles + floordiv(col, 32)) * 1024 +
+           transposed},
+      {HMXLayoutKind::kActivationTransposed,
+       (floordiv(col, 32) * row_tiles + floordiv(row, 32)) * 1024 +
            transposed},
   };
   for (const auto &[kind, expected] : candidates) {
@@ -220,8 +222,10 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
 
 std::optional<Stmt> LowerHMXLayoutCopy(const CopyNode &op, const LowerArgs &T,
                                        arith::Analyzer *analyzer) {
-  if (op.src->dtype != DataType::Float(16) ||
-      op.dst->dtype != DataType::Float(16))
+  if ((op.src->dtype != DataType::Float(16) &&
+       op.src->dtype != DataType::Float(32)) ||
+      (op.dst->dtype != DataType::Float(16) &&
+       op.dst->dtype != DataType::Float(32)))
     return std::nullopt;
 
   std::optional<HMXLayoutKind> src_kind;
@@ -248,6 +252,12 @@ std::optional<Stmt> LowerHMXLayoutCopy(const CopyNode &op, const LowerArgs &T,
   const Array<Range> &row_region = pack ? op.src_range : op.dst_range;
   if (!IsFull2DRegion(hmx_buffer, hmx_region, analyzer))
     return std::nullopt;
+  if (hmx_buffer->dtype != DataType::Float(16))
+    return std::nullopt;
+  const bool cast = row_buffer->dtype == DataType::Float(32);
+  const int kind = static_cast<int>(pack ? *dst_kind : *src_kind);
+  if (cast && kind != static_cast<int>(HMXLayoutKind::kActivation))
+    return std::nullopt;
 
   const PrimExpr &rows_expr = hmx_buffer->shape[0];
   const PrimExpr &cols_expr = hmx_buffer->shape[1];
@@ -267,13 +277,26 @@ std::optional<Stmt> LowerHMXLayoutCopy(const CopyNode &op, const LowerArgs &T,
                                           matrix_extent);
   PrimExpr dst_ptr = MakeAccessPtrAtRegion(op.dst, op.dst_range, dst_strides, 2,
                                           matrix_extent);
-  int kind = static_cast<int>(pack ? *dst_kind : *src_kind);
   const char *fn = pack ? "tl_hexagon_hmx_pack_crouton"
                         : "tl_hexagon_hmx_unpack_crouton";
+  if (cast)
+    fn = pack ? "tl_hexagon_hmx_pack_crouton_f32"
+              : "tl_hexagon_hmx_unpack_crouton_f32";
   Array<PrimExpr> args = {
       StringImm(fn), dst_ptr, src_ptr, rows_expr, cols_expr,
       row_strides[row_rank - 2], row_strides[row_rank - 1],
       IntImm(DataType::Int(32), kind)};
+  if (auto workers = op.annotations.Get("hexagon.copy_workers")) {
+    const auto *nw = workers.value().as<IntImmNode>();
+    ICHECK(nw && nw->value >= 1 && nw->value <= 6)
+        << "hexagon.copy_workers must be an integer in [1, 6]";
+    ICHECK(kind == static_cast<int>(HMXLayoutKind::kActivation) ||
+           kind == static_cast<int>(HMXLayoutKind::kWeightTransposed))
+        << "parallel Crouton copy requires row-tile-major physical storage";
+    args.Set(0, StringImm("tl_hexagon_hmx_copy_crouton_parallel"));
+    args.push_back(IntImm(DataType::Int(32), (cast ? 2 : 0) + (pack ? 0 : 1)));
+    args.push_back(IntImm(DataType::Int(32), nw->value));
+  }
   return Evaluate(Call(DataType::Int(32), builtin::call_extern(), args));
 }
 
@@ -300,6 +323,8 @@ struct Copy {
     }
     if (auto hmx_copy = LowerHMXLayoutCopy(op, T, analyzer))
       return *hmx_copy;
+    ICHECK(!op.annotations.count("hexagon.copy_workers"))
+        << "hexagon.copy_workers requires a supported full Crouton layout copy";
     return LowerNormalCopy(op, T, analyzer);
   }
 };

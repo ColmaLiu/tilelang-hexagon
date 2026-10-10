@@ -202,6 +202,7 @@ TL_DEVICE void tl_hvx_rsqrt_eps_row(__fp16 *out, const __fp16 *in, float eps, in
 
 // ---------------------------------------------------------------------------
 // Row reductions over a contiguous fp16 row of length n -> fp32 scalar.
+// The _f16/_f32 suffix denotes the input dtype; both return fp32 results.
 // Accumulate across vectors, then a butterfly rotate-reduce within one vector
 // (Q6_V_vror_VR rotates by bytes).  Aligned rows use HVX; short or unaligned
 // rows fall back to scalar so arbitrary row widths are correct.
@@ -216,7 +217,7 @@ TL_DEVICE float tl_hvx_lane0_hf(HVX_Vector v) {
   *(HVX_Vector *)buf = v;
   return (float)buf[0];
 }
-TL_DEVICE float tl_hvx_row_max(const __fp16 *in, int n) {
+TL_DEVICE float tl_hvx_row_max_f16(const __fp16 *in, int n) {
   if (n <= 0)
     return -3.4028234663852886e38f;
   if (!tl_hvx_aligned_128(in) || n < TL_HVX_F16_LANES) {
@@ -239,7 +240,7 @@ TL_DEVICE float tl_hvx_row_max(const __fp16 *in, int n) {
   }
   return r;
 }
-TL_DEVICE float tl_hvx_row_sum(const __fp16 *in, int n) {
+TL_DEVICE float tl_hvx_row_sum_f16(const __fp16 *in, int n) {
   if (n <= 0)
     return 0.0f;
   if (!tl_hvx_aligned_128(in) || n < TL_HVX_F16_LANES) {
@@ -263,12 +264,57 @@ TL_DEVICE float tl_hvx_row_sum(const __fp16 *in, int n) {
 // Whole-tile reductions: out[i] = reduce(in[i, :]) for i in [0, rows).  Output
 // is fp32 (the reduce result feeds the fp32 running-max/sum scalar logic in
 // softmax/layernorm).  Rows with 128-byte alignment use HVX; other rows are
-// handled by the scalar path in tl_hvx_row_{max,sum}.
-TL_DEVICE void tl_hvx_rowmax_mat(float *out, const __fp16 *in, int rows, int n) {
-  for (int i = 0; i < rows; ++i) out[i] = tl_hvx_row_max(in + (size_t)i * n, n);
+// handled by the scalar path in tl_hvx_row_{max,sum}_f16.
+TL_DEVICE void tl_hvx_rowmax_mat_f16(float *out, const __fp16 *in, int rows, int n) {
+  for (int i = 0; i < rows; ++i) out[i] = tl_hvx_row_max_f16(in + (size_t)i * n, n);
 }
-TL_DEVICE void tl_hvx_rowsum_mat(float *out, const __fp16 *in, int rows, int n) {
-  for (int i = 0; i < rows; ++i) out[i] = tl_hvx_row_sum(in + (size_t)i * n, n);
+TL_DEVICE void tl_hvx_rowsum_mat_f16(float *out, const __fp16 *in, int rows, int n) {
+  for (int i = 0; i < rows; ++i) out[i] = tl_hvx_row_sum_f16(in + (size_t)i * n, n);
+}
+
+// FP32 reductions are separate from the FP16 entry points: narrowing first
+// changes the semantics of FP32 normalization and attention. Full aligned
+// vectors stay in FP32; short/unaligned rows and the final tail use scalar
+// accesses, with no vector read beyond the logical row.
+TL_DEVICE float tl_hvx_row_sum_f32(const float *in, int n) {
+  float result = 0.0f;
+  int j = 0;
+  if (tl_hvx_aligned_128(in) && n >= TL_HVX_F32_LANES) {
+    HVX_Vector acc = Q6_V_vzero();
+    for (; j + TL_HVX_F32_LANES <= n; j += TL_HVX_F32_LANES)
+      acc = tl_hvx_add_sf(acc, *(const HVX_Vector *)(in + j));
+    for (int shift = 64; shift >= 4; shift >>= 1)
+      acc = tl_hvx_add_sf(acc, Q6_V_vror_VR(acc, shift));
+    result = tl_hvx_lane0_sf(acc);
+  }
+  for (; j < n; ++j) result += in[j];
+  return result;
+}
+
+TL_DEVICE float tl_hvx_row_max_f32(const float *in, int n) {
+  if (n <= 0) return -3.4028234663852886e38f;
+  float result = in[0];
+  int j = 1;
+  if (tl_hvx_aligned_128(in) && n >= TL_HVX_F32_LANES) {
+    HVX_Vector acc = *(const HVX_Vector *)in;
+    for (j = TL_HVX_F32_LANES; j + TL_HVX_F32_LANES <= n;
+         j += TL_HVX_F32_LANES)
+      acc = Q6_Vsf_vmax_VsfVsf(acc, *(const HVX_Vector *)(in + j));
+    for (int shift = 64; shift >= 4; shift >>= 1)
+      acc = Q6_Vsf_vmax_VsfVsf(acc, Q6_V_vror_VR(acc, shift));
+    result = tl_hvx_lane0_sf(acc);
+  }
+  for (; j < n; ++j) if (in[j] > result) result = in[j];
+  return result;
+}
+
+TL_DEVICE void tl_hvx_rowsum_mat_f32(float *out, const float *in, int rows, int n) {
+  for (int i = 0; i < rows; ++i)
+    out[i] = tl_hvx_row_sum_f32(in + (size_t)i * n, n);
+}
+TL_DEVICE void tl_hvx_rowmax_mat_f32(float *out, const float *in, int rows, int n) {
+  for (int i = 0; i < rows; ++i)
+    out[i] = tl_hvx_row_max_f32(in + (size_t)i * n, n);
 }
 
 // ---------------------------------------------------------------------------

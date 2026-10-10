@@ -278,9 +278,10 @@ compares serial and prefetch versions using DSP-local SDK timing; neither file
 imports a handwritten C/C++ compute or DMA scheduling kernel.
 
 **Optional, not yet done:** autotune (`num_workers` + tile sizes as knobs);
-DMA engine ownership integration with worker pools; automatic software-pipeline
-DMA lowering; and schedules for blocks larger than VTCM. Explicit DSL DMA
-submission/wait and DSP timing are available in the examples above.
+automatic software-pipeline DMA lowering; and schedules for blocks larger than VTCM.
+Worker-local managed DMA and synchronous parallel layout copies are now supported
+within the [validated implementation boundaries](hexagon_dsl_demo_ops_zh.md#实现边界).
+Explicit DMA prefetch alone does not establish cross-stage HMX/HVX overlap.
 
 ---
 

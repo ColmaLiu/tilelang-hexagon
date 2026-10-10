@@ -1,11 +1,12 @@
 #pragma once
 // Hexagon User-DMA instruction, descriptor, queue, and managed async-copy helpers.
 //
-// DMA0 is a shared hardware resource.  This header deliberately does not
-// allocate memory, reset the engine during queue initialization, or provide
-// locking.  The caller owns the engine for the lifetime of a queue and supplies
-// descriptor/metadata storage.  This makes the primitives usable by a future
-// TileLang DMA lowering as well as callers managing their own queues.
+// Queues are thread-confined: submit, poll and drain from the same QuRT thread.
+// The managed codegen gives every worker its own descriptors and VTCM region
+// (validated on v79). This is not a claim of one physical DMA engine per worker.
+// A thread must not interleave raw/foreign DMA with its managed queue. This
+// header never resets DMA during initialization or borrows another runtime's
+// queue; callers of the raw layer supply descriptor/metadata storage.
 
 #include <hexagon_protos.h>
 #include <qurt_memory.h>
@@ -341,6 +342,28 @@ TL_DMA_INLINE int tl_hexagon_dma_cache_clean(const void *ptr, uint32_t bytes,
     return TL_HEXAGON_DMA_OK;
   if (ptr == nullptr)
     return TL_HEXAGON_DMA_ERR_ARGUMENT;
+  // Small tiled submissions should not pay a QuRT call per input tile. v79
+  // dccleana cleans both L1D and L2; retain the syncht required by the QuRT
+  // cache-clean contract. This preserves dirty boundary bytes and does NOT
+  // invalidate unrelated input cache lines or skip source publication.
+  if (operation == QURT_MEM_CACHE_FLUSH && bytes <= 128u * 1024u) {
+    uint32_t address;
+    if (!tl_hexagon_dma_address32(ptr, bytes, &address))
+      return TL_HEXAGON_DMA_ERR_RANGE;
+    uint64_t line = (uint64_t)address & ~uint64_t(63);
+    const uint64_t end = (uint64_t)address + bytes;
+    asm volatile("" : : : "memory");
+    for (; (uint64_t)line + 256 <= end; line += 256) {
+      Q6_dccleana_A((void *)(uintptr_t)(line + 0));
+      Q6_dccleana_A((void *)(uintptr_t)(line + 64));
+      Q6_dccleana_A((void *)(uintptr_t)(line + 128));
+      Q6_dccleana_A((void *)(uintptr_t)(line + 192));
+    }
+    for (; (uint64_t)line < end; line += 64)
+      Q6_dccleana_A((void *)(uintptr_t)line);
+    asm volatile("syncht" : : : "memory");
+    return TL_HEXAGON_DMA_OK;
+  }
   int status = qurt_mem_cache_clean(
       static_cast<qurt_addr_t>(reinterpret_cast<uintptr_t>(ptr)),
       static_cast<qurt_size_t>(bytes), operation, QURT_MEM_DCACHE);
@@ -685,8 +708,9 @@ TL_DMA_INLINE int tl_hexagon_dma_queue_reset(tl_hexagon_dma_queue *queue) {
                                    queue->capacity);
 }
 
-// Per-kernel queue used by explicit T.dma_copy/T.dma_wait. The caller must
-// own DMA0 exclusively. Initialization never resets someone else's engine.
+// Per-callback queue used by explicit T.dma_copy/T.dma_wait. The calling thread
+// owns the DMA instruction context for its lifetime. Initialization never
+// resets another queue's outstanding work on this thread.
 // Compile managed async kernels with -fno-exceptions (the DSP has no C++ unwinder).
 // Stack storage survives until the kernel drains its queue, including returns
 // caused by another helper's error. No dynamic allocation or global queue state.
@@ -697,6 +721,9 @@ template <uint32_t Capacity> struct tl_hexagon_dma_async_context {
   tl_hexagon_dma_queue queue{};
   int status;
   void (*release_hmx)() = nullptr;
+  // Worker HMX thread enablement must also be undone on early DMA errors.
+  // Function pointers keep this header independent of the HMX runtime.
+  void (*disable_hmx)() = nullptr;
 
   tl_hexagon_dma_async_context() {
     status = tl_hexagon_dma_engine_idle()
@@ -710,6 +737,8 @@ template <uint32_t Capacity> struct tl_hexagon_dma_async_context {
       tl_hexagon_dma_engine_reset();
     if (release_hmx)
       release_hmx();
+    if (disable_hmx)
+      disable_hmx();
   }
   tl_hexagon_dma_async_context(const tl_hexagon_dma_async_context &) = delete;
   tl_hexagon_dma_async_context &operator=(const tl_hexagon_dma_async_context &) = delete;

@@ -36,7 +36,7 @@ flowchart TB
     A --> SA["src/hexagon/op/gemm.cc SelectInst<br/>门控 → 'hexagon.hmx' 或回退 'cpu.scalar'"]
     SA --> LA["gemm_hmx.py GemmHMX.infer_layout/lower<br/>→ native Crouton + explicit HMX atoms"]
     B --> LB["T.hexagon_hmx_* TIR intrinsic<br/>（dependency token = access_ptr）"]
-    C --> LC["reduce.cc → call_extern('tl_hvx_rowsum_mat')<br/>copy.cc → LowerNormalCopy（同步）<br/>elementwise → 原样进 codegen"]
+    C --> LC["reduce.cc → call_extern('tl_hvx_rowsum_mat_f16')<br/>copy.cc → LowerNormalCopy（同步）<br/>elementwise → 原样进 codegen"]
     LA --> CG["codegen_hexagon.cc<br/>grid→C 循环 · VTCM 静态编排 · intrinsic→函数名映射<br/>HVX elementwise 向量化器 · worker-pool 发射"]
     LB --> CG
     LC --> CG
@@ -145,7 +145,7 @@ return hmx_ok ? "hexagon.hmx" : "cpu.scalar";
 
 ### 3.6 通道③的另两个 tileop：reduce 与 copy
 
-- **`reduce.cc`（hexreduce 的落地）**：为什么必须是 tileop——stock `T.reduce_sum` 走 register fragment，Hexagon 推不了。约束清单写得很清楚（40-66）：仅 2D、dim=1、clear=True、fp16 源/fp32 目标、**源必须整 buffer**（`MakeAccessPtrFromRegion` 会丢 2D 子区域偏移，子区域会静默读错行——所以 ICHECK 拒绝）。落到 `tl_hvx_rowmax_mat/rowsum_mat`。
+- **`reduce.cc`（hexreduce 的落地）**：为什么必须是 tileop——stock `T.reduce_sum` 走 register fragment，Hexagon 推不了。约束清单：仅 2D、dim=1、clear=True、fp16/fp32 源、fp32 目标、**源必须整 buffer**（`MakeAccessPtrFromRegion` 会丢 2D 子区域偏移，子区域会静默读错行——所以 ICHECK 拒绝）。根据输入类型落到 `tl_hvx_rowmax_mat_f16` / `tl_hvx_rowsum_mat_f16` 或对应 `_f32` 版本；后缀表示输入类型。
 - **`copy.cc`：当前就是 `LowerNormalCopy`（同步逐元素）**——这 58 行就是**工作流 2 的改造对象**：异步 DMA 版要在这里选 1D/2D descriptor 并接工作流 6 的 commit/wait hook。
 
 ### 3.7 出口

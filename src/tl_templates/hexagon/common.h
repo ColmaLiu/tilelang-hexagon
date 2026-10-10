@@ -44,6 +44,14 @@ template <typename T, int N> struct vec_type {
   typedef T nat_t __attribute__((ext_vector_type(N)));
   nat_t v __attribute__((aligned(1)));
   vec_type() = default;
+  // Express copies as native vector loads/stores. The implicit aggregate copy
+  // becomes llvm.memcpy (and an out-of-line 128-byte memcpy on Hexagon), even
+  // for a full-register T.copy between VTCM and DDR.
+  vec_type(const vec_type &o) : v(o.v) {}
+  vec_type &operator=(const vec_type &o) {
+    v = o.v;
+    return *this;
+  }
   vec_type(nat_t n) : v(n) {} // wrap a native result (operator returns / loads)
   // Broadcast ctor.  const-ref because __fp16 is not a valid by-value parameter
   // type on Hexagon.  `(nat_t)scalar` is clang's ext_vector splat.

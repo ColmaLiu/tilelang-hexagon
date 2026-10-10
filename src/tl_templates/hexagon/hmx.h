@@ -37,6 +37,7 @@
 #include <string.h>
 #include <tl_templates/hexagon/vtcm.h>   // unified VTCM arena (shared with alloc_shared)
 #include <tl_templates/hexagon/worker.h> // HW-thread worker pool (multithreaded HMX/HVX)
+#include <tl_templates/hexagon/qmatmul.h> // reusable FP32/Crouton row-pair atoms
 
 #define TL_HMX_INLINE static inline __attribute__((unused, always_inline))
 
@@ -310,6 +311,128 @@ TL_HMX_INLINE void tl_hmx_pack_B_T(__fp16 *t, const __fp16 *B, int K, int N) {
   tl_hmx_pack_scalar(t, B, N, K, K / TL_HMX_T, K, 1, 1); // B[n*K+k], col-tile (swap)
 }
 
+// Transpose one 32x32 matrix of packed FP16 pairs in registers. The word
+// at [n, kp] contains W[n, 2*kp:2*kp+2]; after transpose one HVX vector
+// is exactly one Crouton K-row pair across 32 N columns. Five butterfly
+// stages avoid scatter and its readback fence. All source loads are 128B
+// and stay inside the caller's 32x64 logical rectangle.
+TL_HMX_INLINE void tl_hmx_pack_weight_32x64(__fp16 *dst,
+                                           const __fp16 *src, int si) {
+#define TL_HMX_LOAD_ROW(n) HVX_Vector v##n = *(const HVX_Vector *)(src + (size_t)(n) * si)
+#define TL_HMX_SHUFFLE(a, b, shift) do { \
+  HVX_VectorPair p = Q6_W_vshuff_VVR(v##b, v##a, shift); \
+  v##a = Q6_V_lo_W(p); v##b = Q6_V_hi_W(p); \
+} while (0)
+  TL_HMX_LOAD_ROW(0); TL_HMX_LOAD_ROW(1); TL_HMX_LOAD_ROW(2); TL_HMX_LOAD_ROW(3);
+  TL_HMX_LOAD_ROW(4); TL_HMX_LOAD_ROW(5); TL_HMX_LOAD_ROW(6); TL_HMX_LOAD_ROW(7);
+  TL_HMX_LOAD_ROW(8); TL_HMX_LOAD_ROW(9); TL_HMX_LOAD_ROW(10); TL_HMX_LOAD_ROW(11);
+  TL_HMX_LOAD_ROW(12); TL_HMX_LOAD_ROW(13); TL_HMX_LOAD_ROW(14); TL_HMX_LOAD_ROW(15);
+  TL_HMX_LOAD_ROW(16); TL_HMX_LOAD_ROW(17); TL_HMX_LOAD_ROW(18); TL_HMX_LOAD_ROW(19);
+  TL_HMX_LOAD_ROW(20); TL_HMX_LOAD_ROW(21); TL_HMX_LOAD_ROW(22); TL_HMX_LOAD_ROW(23);
+  TL_HMX_LOAD_ROW(24); TL_HMX_LOAD_ROW(25); TL_HMX_LOAD_ROW(26); TL_HMX_LOAD_ROW(27);
+  TL_HMX_LOAD_ROW(28); TL_HMX_LOAD_ROW(29); TL_HMX_LOAD_ROW(30); TL_HMX_LOAD_ROW(31);
+  // Interleave groups of 1 packed words.
+  TL_HMX_SHUFFLE(0, 1, -4); TL_HMX_SHUFFLE(2, 3, -4);
+  TL_HMX_SHUFFLE(4, 5, -4); TL_HMX_SHUFFLE(6, 7, -4);
+  TL_HMX_SHUFFLE(8, 9, -4); TL_HMX_SHUFFLE(10, 11, -4);
+  TL_HMX_SHUFFLE(12, 13, -4); TL_HMX_SHUFFLE(14, 15, -4);
+  TL_HMX_SHUFFLE(16, 17, -4); TL_HMX_SHUFFLE(18, 19, -4);
+  TL_HMX_SHUFFLE(20, 21, -4); TL_HMX_SHUFFLE(22, 23, -4);
+  TL_HMX_SHUFFLE(24, 25, -4); TL_HMX_SHUFFLE(26, 27, -4);
+  TL_HMX_SHUFFLE(28, 29, -4); TL_HMX_SHUFFLE(30, 31, -4);
+  // Interleave groups of 2 packed words.
+  TL_HMX_SHUFFLE(0, 2, -8); TL_HMX_SHUFFLE(1, 3, -8);
+  TL_HMX_SHUFFLE(4, 6, -8); TL_HMX_SHUFFLE(5, 7, -8);
+  TL_HMX_SHUFFLE(8, 10, -8); TL_HMX_SHUFFLE(9, 11, -8);
+  TL_HMX_SHUFFLE(12, 14, -8); TL_HMX_SHUFFLE(13, 15, -8);
+  TL_HMX_SHUFFLE(16, 18, -8); TL_HMX_SHUFFLE(17, 19, -8);
+  TL_HMX_SHUFFLE(20, 22, -8); TL_HMX_SHUFFLE(21, 23, -8);
+  TL_HMX_SHUFFLE(24, 26, -8); TL_HMX_SHUFFLE(25, 27, -8);
+  TL_HMX_SHUFFLE(28, 30, -8); TL_HMX_SHUFFLE(29, 31, -8);
+  // Interleave groups of 4 packed words.
+  TL_HMX_SHUFFLE(0, 4, -16); TL_HMX_SHUFFLE(1, 5, -16);
+  TL_HMX_SHUFFLE(2, 6, -16); TL_HMX_SHUFFLE(3, 7, -16);
+  TL_HMX_SHUFFLE(8, 12, -16); TL_HMX_SHUFFLE(9, 13, -16);
+  TL_HMX_SHUFFLE(10, 14, -16); TL_HMX_SHUFFLE(11, 15, -16);
+  TL_HMX_SHUFFLE(16, 20, -16); TL_HMX_SHUFFLE(17, 21, -16);
+  TL_HMX_SHUFFLE(18, 22, -16); TL_HMX_SHUFFLE(19, 23, -16);
+  TL_HMX_SHUFFLE(24, 28, -16); TL_HMX_SHUFFLE(25, 29, -16);
+  TL_HMX_SHUFFLE(26, 30, -16); TL_HMX_SHUFFLE(27, 31, -16);
+  // Interleave groups of 8 packed words.
+  TL_HMX_SHUFFLE(0, 8, -32); TL_HMX_SHUFFLE(1, 9, -32);
+  TL_HMX_SHUFFLE(2, 10, -32); TL_HMX_SHUFFLE(3, 11, -32);
+  TL_HMX_SHUFFLE(4, 12, -32); TL_HMX_SHUFFLE(5, 13, -32);
+  TL_HMX_SHUFFLE(6, 14, -32); TL_HMX_SHUFFLE(7, 15, -32);
+  TL_HMX_SHUFFLE(16, 24, -32); TL_HMX_SHUFFLE(17, 25, -32);
+  TL_HMX_SHUFFLE(18, 26, -32); TL_HMX_SHUFFLE(19, 27, -32);
+  TL_HMX_SHUFFLE(20, 28, -32); TL_HMX_SHUFFLE(21, 29, -32);
+  TL_HMX_SHUFFLE(22, 30, -32); TL_HMX_SHUFFLE(23, 31, -32);
+  // Interleave groups of 16 packed words.
+  TL_HMX_SHUFFLE(0, 16, -64); TL_HMX_SHUFFLE(1, 17, -64);
+  TL_HMX_SHUFFLE(2, 18, -64); TL_HMX_SHUFFLE(3, 19, -64);
+  TL_HMX_SHUFFLE(4, 20, -64); TL_HMX_SHUFFLE(5, 21, -64);
+  TL_HMX_SHUFFLE(6, 22, -64); TL_HMX_SHUFFLE(7, 23, -64);
+  TL_HMX_SHUFFLE(8, 24, -64); TL_HMX_SHUFFLE(9, 25, -64);
+  TL_HMX_SHUFFLE(10, 26, -64); TL_HMX_SHUFFLE(11, 27, -64);
+  TL_HMX_SHUFFLE(12, 28, -64); TL_HMX_SHUFFLE(13, 29, -64);
+  TL_HMX_SHUFFLE(14, 30, -64); TL_HMX_SHUFFLE(15, 31, -64);
+  // Butterfly register indices are the five-bit reversal of K-pair index.
+  *(HVX_Vector *)(dst + 0) = v0;
+  *(HVX_Vector *)(dst + 64) = v16;
+  *(HVX_Vector *)(dst + 128) = v8;
+  *(HVX_Vector *)(dst + 192) = v24;
+  *(HVX_Vector *)(dst + 256) = v4;
+  *(HVX_Vector *)(dst + 320) = v20;
+  *(HVX_Vector *)(dst + 384) = v12;
+  *(HVX_Vector *)(dst + 448) = v28;
+  *(HVX_Vector *)(dst + 512) = v2;
+  *(HVX_Vector *)(dst + 576) = v18;
+  *(HVX_Vector *)(dst + 640) = v10;
+  *(HVX_Vector *)(dst + 704) = v26;
+  *(HVX_Vector *)(dst + 768) = v6;
+  *(HVX_Vector *)(dst + 832) = v22;
+  *(HVX_Vector *)(dst + 896) = v14;
+  *(HVX_Vector *)(dst + 960) = v30;
+  *(HVX_Vector *)(dst + 1024) = v1;
+  *(HVX_Vector *)(dst + 1088) = v17;
+  *(HVX_Vector *)(dst + 1152) = v9;
+  *(HVX_Vector *)(dst + 1216) = v25;
+  *(HVX_Vector *)(dst + 1280) = v5;
+  *(HVX_Vector *)(dst + 1344) = v21;
+  *(HVX_Vector *)(dst + 1408) = v13;
+  *(HVX_Vector *)(dst + 1472) = v29;
+  *(HVX_Vector *)(dst + 1536) = v3;
+  *(HVX_Vector *)(dst + 1600) = v19;
+  *(HVX_Vector *)(dst + 1664) = v11;
+  *(HVX_Vector *)(dst + 1728) = v27;
+  *(HVX_Vector *)(dst + 1792) = v7;
+  *(HVX_Vector *)(dst + 1856) = v23;
+  *(HVX_Vector *)(dst + 1920) = v15;
+  *(HVX_Vector *)(dst + 1984) = v31;
+#undef TL_HMX_SHUFFLE
+#undef TL_HMX_LOAD_ROW
+}
+
+// Pack row-major W[N,K] to weight Crouton in caller-owned VTCM. A 64-half
+// source load contains two K tiles. Register shuffles transpose packed pairs;
+// every load stays inside the logical row, with no readable padding required.
+// Noncontiguous, unaligned and 32-column remainder layouts retain the scalar
+// path. This is a layout-copy primitive, not a GEMM schedule or worker task.
+TL_HMX_INLINE void tl_hmx_pack_weight_transposed(__fp16 *dst,
+                                                const __fp16 *src, int N, int K,
+                                                int si, int sj) {
+  if (sj == 1 && K % 64 == 0 && si >= K && si % 64 == 0 &&
+      ((uintptr_t)src & 127u) == 0 && ((uintptr_t)dst & 127u) == 0) {
+    for (int nt = 0; nt < N / 32; ++nt)
+      for (int kc = 0; kc < K / 64; ++kc)
+        tl_hmx_pack_weight_32x64(
+            dst + ((size_t)nt * (K / 32) + 2 * kc) * TL_HMX_TILE_ELMS,
+            src + (size_t)nt * 32 * si + kc * 64, si);
+    return;
+  }
+  tl_hmx_pack_scalar(dst, src, N, K, K / TL_HMX_T, si, sj, 1);
+}
+
 // Layout kinds shared with src/hexagon/op/copy.cc.  Public pack/unpack wrappers
 // lower one logical T.copy.  The row-major endpoint may be a strided DDR/VTCM
 // matrix region; the Crouton endpoint is always a complete caller-owned VTCM
@@ -341,8 +464,7 @@ TL_HMX_INLINE void tl_hexagon_hmx_pack_crouton(__fp16 *dst,
     return;
   case TL_HMX_LAYOUT_WEIGHT_TRANSPOSED:
     // Storage and physical outer coordinates are both [N,K].
-    tl_hmx_pack_scalar(dst, src, rows, cols, cols / TL_HMX_T, src_stride0,
-                       src_stride1, 1);
+    tl_hmx_pack_weight_transposed(dst, src, rows, cols, src_stride0, src_stride1);
     return;
   default:
     return;
@@ -384,6 +506,93 @@ TL_HMX_INLINE void tl_hexagon_hmx_unpack_crouton(__fp16 *dst,
         dst[(size_t)n * dst_stride0 + (size_t)k * dst_stride1] =
             src[tl_hmx_off(n, k, cols / TL_HMX_T, 1)];
   }
+}
+
+// Fused numeric conversion and activation/output layout copy. These primitives
+// visit row pairs, never a GEMM or reduction. Scalar fallback retains arbitrary
+// source/destination strides; full 32-column row pairs use two HVX registers.
+TL_HMX_INLINE void tl_hexagon_hmx_pack_crouton_f32(
+    __fp16 *dst, const float *src, int rows, int cols, int si, int sj, int kind) {
+  (void)kind; // Lowering only selects activation/output Crouton (kind 0).
+  if (sj == 1) {
+    for (int mt = 0; mt < rows / 32; ++mt)
+      for (int kt = 0; kt < cols / 32; ++kt)
+        for (int pair = 0; pair < 16; ++pair)
+          tl_hexagon_hmx_pack_a_f32_pair_k32(
+              dst + (size_t)(mt * (cols / 32) + kt) * 1024 + pair * 64,
+              src + (size_t)(mt * 32 + pair * 2) * si + kt * 32,
+              src + (size_t)(mt * 32 + pair * 2 + 1) * si + kt * 32);
+    return;
+  }
+  for (int r = 0; r < rows; ++r)
+    for (int c = 0; c < cols; ++c)
+      dst[tl_hmx_off(r, c, cols / 32, 0)] = (__fp16)src[(size_t)r * si + (size_t)c * sj];
+}
+
+TL_HMX_INLINE void tl_hexagon_hmx_unpack_crouton_f32(
+    float *dst, const __fp16 *src, int rows, int cols, int si, int sj, int kind) {
+  (void)kind;
+  if (sj == 1) {
+    for (int mt = 0; mt < rows / 32; ++mt)
+      for (int nt = 0; nt < cols / 32; ++nt)
+        for (int pair = 0; pair < 16; ++pair)
+          tl_hexagon_hmx_unpack_c_f32_pair_n32(
+              dst + (size_t)(mt * 32 + pair * 2) * si + nt * 32,
+              dst + (size_t)(mt * 32 + pair * 2 + 1) * si + nt * 32,
+              src + (size_t)(mt * (cols / 32) + nt) * 1024 + pair * 64);
+    return;
+  }
+  for (int r = 0; r < rows; ++r)
+    for (int c = 0; c < cols; ++c)
+      dst[(size_t)r * si + (size_t)c * sj] = (float)src[tl_hmx_off(r, c, cols / 32, 0)];
+}
+
+// Synchronous parallel T.copy: workers partition disjoint 32x32/64 tiles in
+// row-tile-major storage. It may overlap DMA on the caller's next input slot,
+// but returns only after all stripes are visible. No DMA/HMX ownership, scratch
+// allocation, or operator scheduling is hidden here. The codegen rejects nested
+// pool dispatch; the caller owns both endpoints throughout this copy.
+struct tl_hmx_parallel_copy_args {
+  void *dst;
+  const void *src;
+  int rows, cols, si, sj, kind, operation;
+};
+
+static int tl_hmx_parallel_copy_worker(void *opaque, int wid, int nw) {
+  const auto &a = *static_cast<tl_hmx_parallel_copy_args *>(opaque);
+  // Two adjacent K/N tiles preserve the FP16 packer's full-HVX source loads.
+  // Partition both axes so short-M, long-K copies can use all workers too.
+  const int tc = a.cols % 64 == 0 ? 64 : 32;
+  const int columns = a.cols / tc;
+  for (int tile = wid; tile < (a.rows / 32) * columns; tile += nw) {
+    const int rt = tile / columns, ct = tile % columns;
+    const size_t native_offset = (size_t)rt * 32 * a.cols + ct * tc * 32;
+    const size_t row_offset = (size_t)rt * 32 * a.si + (size_t)ct * tc * a.sj;
+    if (a.operation == 0)
+      tl_hexagon_hmx_pack_crouton(static_cast<__fp16 *>(a.dst) + native_offset,
+          static_cast<const __fp16 *>(a.src) + row_offset, 32, tc, a.si, a.sj, a.kind);
+    else if (a.operation == 1)
+      tl_hexagon_hmx_unpack_crouton(static_cast<__fp16 *>(a.dst) + row_offset,
+          static_cast<const __fp16 *>(a.src) + native_offset, 32, tc, a.si, a.sj, a.kind);
+    else if (a.operation == 2)
+      tl_hexagon_hmx_pack_crouton_f32(static_cast<__fp16 *>(a.dst) + native_offset,
+          static_cast<const float *>(a.src) + row_offset, 32, tc, a.si, a.sj, a.kind);
+    else
+      tl_hexagon_hmx_unpack_crouton_f32(static_cast<float *>(a.dst) + row_offset,
+          static_cast<const __fp16 *>(a.src) + native_offset, 32, tc, a.si, a.sj, a.kind);
+  }
+  return 0;
+}
+
+TL_HMX_INLINE void tl_hexagon_hmx_copy_crouton_parallel(
+    void *dst, const void *src, int rows, int cols, int si, int sj, int kind,
+    int operation, int workers) {
+  tl_hmx_parallel_copy_args args{dst, src, rows, cols, si, sj, kind, operation};
+  int nw = tl_num_workers();
+  if (nw > workers) nw = workers;
+  int tiles = (rows / 32) * (cols / (cols % 64 == 0 ? 64 : 32));
+  if (nw > tiles) nw = tiles;
+  tl_parallel(tl_hmx_parallel_copy_worker, &args, nw);
 }
 
 TL_HMX_INLINE void tl_hmx_matmul_tiles(__fp16 *c, const __fp16 *a,

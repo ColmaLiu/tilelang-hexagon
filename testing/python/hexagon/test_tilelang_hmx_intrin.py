@@ -453,8 +453,8 @@ def test_t_gemm_unsupported_output_dtype_stays_on_scalar_fallback():
 
 def test_flash_attention_keeps_row_reduce_outside_crouton_buffers():
     source = _lower_source(make_flash(64, 64, 64, 64))
-    rowmax = next(line for line in source.splitlines() if "tl_hvx_rowmax_mat" in line)
-    rowsum = next(line for line in source.splitlines() if "tl_hvx_rowsum_mat" in line)
+    rowmax = next(line for line in source.splitlines() if "tl_hvx_rowmax_mat_f16(" in line)
+    rowsum = next(line for line in source.splitlines() if "tl_hvx_rowsum_mat_f16(" in line)
 
     assert source.count("tl_hexagon_hmx_mma_atom") == 2
     assert "((half*)S)[0]" in rowmax
