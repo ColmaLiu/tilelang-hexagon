@@ -1,8 +1,9 @@
 """Host lowering contracts for Hexagon demo operators and layout copies."""
+import os
 import pytest
 import tilelang
 from tilelang.utils.target import determine_target
-from examples.hexagon.example_demo_ops import hexreduce, make_elementwise, make_gemm_f16_io, make_rmsnorm_fp32
+from examples.hexagon.example_demo_ops import hexreduce, make_elementwise, make_gemm_f16_io, make_map_tiled, make_rmsnorm_fp32
 import tilelang.language as T
 from tilelang.hexagon.hmx_intrin import HMXIntrinEmitter
 
@@ -116,11 +117,48 @@ def test_transposed_weight_copy_preserves_source_and_destination_strides():
 
 def test_gemm_fused_parallel_layout_copies_remain_dsl():
     source = lower(make_gemm_f16_io(256, 512, 2048, 256, copy_workers=6, fused_copy=True))
-    assert source.count("tl_hexagon_hmx_copy_crouton_parallel(") == 2
-    assert "tl_hexagon_hmx_unpack_crouton_f32(" in source
+    assert source.count("tl_hexagon_hmx_copy_crouton_parallel(") == 3
     assert "tl_hexagon_hmx_mma_atom(" in source
     assert "a_row" not in source and "c_row" not in source
     assert "demo_parallel_pack" not in source
+
+
+@pytest.mark.skipif(os.environ.get("TL_HEXAGON_DEVICE_TEST") != "1",
+                    reason="requires an authorized Hexagon device and SDK")
+@pytest.mark.parametrize("width", [32, 96, 128, 160, 2048])
+def test_tiled_rmsnorm_vector_partials_cover_full_width(width):
+    import torch
+    from tilelang import tvm
+    fn = make_map_tiled(8, width, "rmsnorm", 2, 2, num_workers=2)
+    # The comparison harness supplies a common X/Y/O interface, but unary
+    # kernels do not use Y. Match its adapter before direct FastRPC compilation.
+    unused = fn.params[1]
+    fn = tvm.tirx.PrimFunc(
+        [fn.params[0], fn.params[2]], fn.body, fn.ret_type,
+        {p: b for p, b in fn.buffer_map.items() if not p.same_as(unused)},
+        fn.attrs, fn.span,
+    )
+    kernel = tilelang.compile(fn, out_idx=[1], target="hexagon")
+    try:
+        for seed in [1, 2, 3]:
+            torch.manual_seed(seed)
+            x = torch.randn(8, width)
+            out = kernel(x)
+            ref = x / torch.sqrt((x * x).mean(dim=1, keepdim=True) + 1e-5)
+            assert torch.isfinite(out).all()
+            torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-6)
+    finally:
+        kernel.adapter.close()
+
+
+def test_wide_gemm_keeps_single_raw_slot_within_vtcm_budget():
+    import re
+    source = lower(make_gemm_f16_io(256, 2048, 2048, 512,
+                                    copy_workers=6, fused_copy=True))
+    high = max(map(int, re.findall(r"tl_vtcm_shared_high_water = (\d+)u", source)))
+    assert high <= 8 * 1024 * 1024
+    assert "tl_dma_async.wait(0)" in source
+    assert "tl_hexagon_hmx_mma_atom(" in source
 
 
 @pytest.mark.parametrize("workers", [0, 7])

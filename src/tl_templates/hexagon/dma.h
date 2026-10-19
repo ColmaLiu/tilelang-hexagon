@@ -337,34 +337,49 @@ TL_DMA_INLINE int tl_hexagon_dma_start_and_wait(
 // ---------------------------------------------------------------------------
 
 TL_DMA_INLINE int tl_hexagon_dma_cache_clean(const void *ptr, uint32_t bytes,
-                                              qurt_mem_cache_op_t operation) {
+                                             qurt_mem_cache_op_t operation) {
+  constexpr uint64_t kCacheLineBytes = 64;
+  constexpr uint64_t kCleanBatchBytes = 4 * kCacheLineBytes;
+  constexpr uint32_t kInlineCleanLimit = 128u * 1024u;
+
   if (bytes == 0)
     return TL_HEXAGON_DMA_OK;
   if (ptr == nullptr)
     return TL_HEXAGON_DMA_ERR_ARGUMENT;
-  // Small tiled submissions should not pay a QuRT call per input tile. v79
-  // dccleana cleans both L1D and L2; retain the syncht required by the QuRT
-  // cache-clean contract. This preserves dirty boundary bytes and does NOT
-  // invalidate unrelated input cache lines or skip source publication.
-  if (operation == QURT_MEM_CACHE_FLUSH && bytes <= 128u * 1024u) {
-    uint32_t address;
-    if (!tl_hexagon_dma_address32(ptr, bytes, &address))
-      return TL_HEXAGON_DMA_ERR_RANGE;
-    uint64_t line = (uint64_t)address & ~uint64_t(63);
-    const uint64_t end = (uint64_t)address + bytes;
-    asm volatile("" : : : "memory");
-    for (; (uint64_t)line + 256 <= end; line += 256) {
-      Q6_dccleana_A((void *)(uintptr_t)(line + 0));
-      Q6_dccleana_A((void *)(uintptr_t)(line + 64));
-      Q6_dccleana_A((void *)(uintptr_t)(line + 128));
-      Q6_dccleana_A((void *)(uintptr_t)(line + 192));
+
+  if (operation == QURT_MEM_CACHE_FLUSH) {
+    if (bytes <= kInlineCleanLimit) {
+      // Avoid a QuRT call for small ranges. On v79, dccleana writes back L1D
+      // and L2 without invalidating; syncht completes the cache operations.
+      uint32_t address;
+      if (!tl_hexagon_dma_address32(ptr, bytes, &address))
+        return TL_HEXAGON_DMA_ERR_RANGE;
+      uint64_t line = static_cast<uint64_t>(address) & ~(kCacheLineBytes - 1);
+      const uint64_t end = static_cast<uint64_t>(address) + bytes;
+      asm volatile("" : : : "memory");
+      for (; line + kCleanBatchBytes <= end; line += kCleanBatchBytes) {
+        Q6_dccleana_A(reinterpret_cast<void *>(static_cast<uintptr_t>(line)));
+        Q6_dccleana_A(reinterpret_cast<void *>(
+            static_cast<uintptr_t>(line + kCacheLineBytes)));
+        Q6_dccleana_A(reinterpret_cast<void *>(
+            static_cast<uintptr_t>(line + 2 * kCacheLineBytes)));
+        Q6_dccleana_A(reinterpret_cast<void *>(
+            static_cast<uintptr_t>(line + 3 * kCacheLineBytes)));
+      }
+      for (; line < end; line += kCacheLineBytes)
+        Q6_dccleana_A(reinterpret_cast<void *>(static_cast<uintptr_t>(line)));
+      asm volatile("syncht" : : : "memory");
+      return TL_HEXAGON_DMA_OK;
     }
-    for (; (uint64_t)line < end; line += 64)
-      Q6_dccleana_A((void *)(uintptr_t)line);
-    asm volatile("syncht" : : : "memory");
-    return TL_HEXAGON_DMA_OK;
+
+    // Bound large writebacks by cache size, preserving valid cache contents.
+    // Destination invalidation remains range-based in the fallback below.
+    const int status =
+        qurt_mem_cache_clean(0, 0, QURT_MEM_CACHE_FLUSH_ALL, QURT_MEM_DCACHE);
+    return status == 0 ? TL_HEXAGON_DMA_OK : TL_HEXAGON_DMA_ERR_CACHE;
   }
-  int status = qurt_mem_cache_clean(
+
+  const int status = qurt_mem_cache_clean(
       static_cast<qurt_addr_t>(reinterpret_cast<uintptr_t>(ptr)),
       static_cast<qurt_size_t>(bytes), operation, QURT_MEM_DCACHE);
   return status == 0 ? TL_HEXAGON_DMA_OK : TL_HEXAGON_DMA_ERR_CACHE;

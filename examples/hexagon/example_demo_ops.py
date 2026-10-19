@@ -93,6 +93,7 @@ def make_map_tiled(M, N, kind="add", tile_rows=4, group_tiles=4,
     binary = kind in ("add", "mul")
     groups = M // (tile_rows * group_tiles)
     pending = 2 if binary else 1
+    partial_lanes = 128 if N % 128 == 0 else 32
 
     @T.macro
     def submit(X, Y, sx, sy, row, slot):
@@ -124,7 +125,9 @@ def make_map_tiled(M, N, kind="add", tile_rows=4, group_tiles=4,
             sx = T.alloc_shared((2, tile_rows, N), "float32")
             sy = T.alloc_shared((2, tile_rows, N), "float32")
             result = T.alloc_shared((tile_rows, N), "float32")
-            squares = T.alloc_shared((tile_rows, N), "float32")
+            partial = T.alloc_shared((1, partial_lanes), "float32")
+            vacc = T.alloc_local((partial_lanes // 32,), "float32x32")
+            row_sum = T.alloc_local((1,), "float32")
             sums = T.alloc_shared((tile_rows,), "float32")
             inv = T.alloc_local((1,), "float32")
             if dma:
@@ -142,9 +145,19 @@ def make_map_tiled(M, N, kind="add", tile_rows=4, group_tiles=4,
                     if binary:
                         T.copy(Y[row:row + tile_rows, :], sy[i % 2, :, :])
                 if kind == "rmsnorm":
-                    for r, j in T.Parallel(tile_rows, N):
-                        squares[r, j] = sx[i % 2, r, j] * sx[i % 2, r, j]
-                    hexreduce(squares, sums, "sum", 1)
+                    for r in T.serial(tile_rows):
+                        # Keep independent sums in vector locals. Only spill
+                        # the final partials for the existing row-reduce op.
+                        for u in T.unroll(partial_lanes // 32):
+                            vacc[u] = T.Broadcast(T.float32(0), 32)
+                        for k in T.serial(N // partial_lanes):
+                            for u in T.unroll(partial_lanes // 32):
+                                x = sx[i % 2, r, T.Ramp(k * partial_lanes + u * 32, 1, 32)]
+                                vacc[u] = vacc[u] + x * x
+                        for u in T.unroll(partial_lanes // 32):
+                            partial[0, T.Ramp(u * 32, 1, 32)] = vacc[u]
+                        hexreduce(partial, row_sum, "sum", 1)
+                        sums[r] = row_sum[0]
                 if dma_store:
                     compute(sx, sy, sums, inv, result, 0, i % 2)
                     T.dma_copy(result, O[row:row + tile_rows, :])
@@ -160,18 +173,21 @@ def make_map_tiled(M, N, kind="add", tile_rows=4, group_tiles=4,
 def make_gemm_f16_io(M, N, K, BN=128, copy_workers=1, fused_copy=False):
     """FP32 A[M,K], FP16 W[N,K] -> FP32 C[M,N], with FP16 HMX arithmetic.
 
-    All per-call conversion/packing is included. Two W slots are prefetched
-    using TileLang's DMA FIFO; one HMX thread owns the accumulator. K is kept
-    whole to avoid changing accumulation semantics. Shapes are bounded by the
-    VTCM grant (large full-K live sets fail the backend allocation guard).
+    All per-call conversion/packing is included. Narrow W blocks use two raw
+    DMA slots; blocks of at least 512 rows use one to bound the VTCM footprint.
+    After packing, refill the raw slot while HMX reads the separate native
+    buffer. K is kept whole to avoid changing accumulation semantics. Shapes
+    are bounded by the VTCM grant (oversized live sets fail the allocation guard).
     """
     if min(M, N, K, BN) <= 0 or any(v % 32 for v in (M, N, K, BN)) or N % BN:
         raise ValueError("positive 32-multiple dimensions with N divisible by BN required")
     if not 1 <= copy_workers <= 6:
         raise ValueError("copy_workers must be in [1, 6]")
     copy_annotations = {"hexagon.copy_workers": copy_workers} if copy_workers > 1 else {}
+    output_annotations = copy_annotations if M >= 128 else {}
     emitter = HMXIntrinEmitter(M, BN, K, b_transposed=True)
     count = N // BN
+    slots = 1 if BN >= 512 else min(2, count)
 
     @T.prim_func
     def gemm(A: T.Tensor((M, K), "float32"), W: T.Tensor((N, K), "float16"),
@@ -181,7 +197,7 @@ def make_gemm_f16_io(M, N, K, BN=128, copy_workers=1, fused_copy=False):
             a_dma = T.alloc_shared((M, K), "float32", align=2048)
             a_row = T.alloc_shared((M, K), "float16", align=2048)
             a_native = T.alloc_shared((M, K), "float16", align=2048)
-            w_dma = T.alloc_shared((min(2, count), BN, K), "float16", align=2048)
+            w_dma = T.alloc_shared((slots, BN, K), "float16", align=2048)
             w_native = T.alloc_shared((BN, K), "float16", align=2048)
             c_native = T.alloc_shared((M, BN), "float16", align=2048)
             c_row = T.alloc_shared((M, BN), "float16", align=2048)
@@ -196,9 +212,9 @@ def make_gemm_f16_io(M, N, K, BN=128, copy_workers=1, fused_copy=False):
                 config[i] = T.uint32(0x3C00)
                 config[i + 32] = T.uint32(0)
             T.dma_copy(A, a_dma)
-            for ni in T.serial(min(2, count)):
+            for ni in T.serial(slots):
                 T.dma_copy(W[ni * BN:(ni + 1) * BN, :], w_dma[ni, :, :])
-            T.dma_wait(min(2, count))
+            T.dma_wait(slots)
             if fused_copy:
                 T.copy(a_dma, a_native, annotations=copy_annotations)
             else:
@@ -209,12 +225,13 @@ def make_gemm_f16_io(M, N, K, BN=128, copy_workers=1, fused_copy=False):
             emitter.load_bias(bias_state, config)
             for ni in T.serial(count):
                 if ni < count - 1:
-                    T.dma_wait(1)
+                    T.dma_wait(slots - 1)
                 else:
                     T.dma_wait()
-                T.copy(w_dma[ni % 2, :, :], w_native, annotations=copy_annotations)
-                if ni + 2 < count:
-                    T.dma_copy(W[(ni + 2) * BN:(ni + 3) * BN, :], w_dma[ni % 2, :, :])
+                T.copy(w_dma[ni % slots, :, :], w_native, annotations=copy_annotations)
+                if ni + slots < count:
+                    T.dma_copy(W[(ni + slots) * BN:(ni + slots + 1) * BN, :],
+                               w_dma[ni % slots, :, :])
                 for mt in T.serial(M // 32):
                     for nt in T.serial(BN // 32):
                         emitter.clear(acc)
@@ -222,7 +239,8 @@ def make_gemm_f16_io(M, N, K, BN=128, copy_workers=1, fused_copy=False):
                         emitter.convert(cvt, acc, bias_state, config)
                         emitter.store(cvt, acc, c_native, bias_state, config, mt, nt)
                 if fused_copy:
-                    T.copy(c_native, C[:, ni * BN:(ni + 1) * BN])
+                    T.copy(c_native, C[:, ni * BN:(ni + 1) * BN],
+                           annotations=output_annotations)
                 else:
                     T.copy(c_native, c_row)
                     for i, j in T.Parallel(M, BN):

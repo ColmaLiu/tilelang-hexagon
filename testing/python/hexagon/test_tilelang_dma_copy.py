@@ -1,5 +1,6 @@
 """Hexagon async submission, completion, and VTCM allocation contracts."""
 import importlib.util
+import os
 from pathlib import Path
 import re
 
@@ -11,6 +12,53 @@ from tilelang.utils.target import determine_target
 from tilelang.hexagon.hmx_intrin import HMXIntrinEmitter
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.skipif(os.environ.get("TL_HEXAGON_DEVICE_TEST") != "1",
+                    reason="requires an authorized Hexagon device and SDK")
+@pytest.mark.parametrize("size", [32736, 32768, 32769, 524288])
+def test_dma_publishes_dirty_ddr_and_preserves_boundary_lines(size):
+    """Exercise both sides of the 128 KiB clean threshold on real hardware.
+
+    The DSP dirties the source and destination before DMA. The destination
+    begins inside a cache line, so its guards must survive clean/invalidate.
+    A DSP readback also checks that stale destination cache lines are removed.
+    """
+    import torch
+
+    @T.prim_func
+    def probe(A: T.Tensor((size + 64,), "float32"),
+              Scratch: T.Tensor((size + 64,), "float32"),
+              Dst: T.Tensor((size + 64,), "float32"),
+              Readback: T.Tensor((size + 64,), "float32"),
+              Copied: T.Tensor((size,), "float32")):
+        with T.Kernel(1, threads=1):
+            staged = T.alloc_shared((size,), "float32", align=128)
+            for j in T.Parallel(size + 64):
+                Scratch[j] = A[j] * T.float32(2) + T.float32(1)
+                Dst[j] = T.float32(-321.25)
+            T.dma_copy(Scratch[1:size + 1], staged)
+            T.dma_wait()
+            T.dma_copy(staged, Dst[1:size + 1])
+            T.dma_wait()
+            T.copy(staged, Copied)
+            T.copy(Dst, Readback)
+
+    kernel = tilelang.compile(probe, out_idx=[1, 2, 3, 4], target="hexagon")
+    try:
+        for seed in [1, 2, 3]:
+            torch.manual_seed(seed)
+            src = torch.randn(size + 64)
+            scratch, dst, readback, copied = kernel(src)
+            expected = src * 2 + 1
+            guarded = torch.full_like(src, -321.25)
+            guarded[1:size + 1] = expected[1:size + 1]
+            torch.testing.assert_close(scratch, expected, rtol=0, atol=0)
+            torch.testing.assert_close(copied, expected[1:size + 1], rtol=0, atol=0)
+            torch.testing.assert_close(dst, guarded, rtol=0, atol=0)
+            torch.testing.assert_close(readback, guarded, rtol=0, atol=0)
+    finally:
+        kernel.adapter.close()
 
 
 def lower(func):
