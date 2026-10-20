@@ -5,18 +5,21 @@
 // receive borrowed buffers/callbacks through tl_op_ctx.
 #include <tl_templates/hexagon/tl_embed.h>
 
-#include <HAP_compute_res.h>
 #include "htp-ops.h"
+#include <HAP_compute_res.h>
 
 #include <stddef.h>
 #include <stdint.h>
 
-extern "C" int32_t tl_walkthrough_q4_m32_n256_k2048_pack_kernel(
-    float *, void *, uint32_t *);
-extern "C" int32_t tl_walkthrough_q4_m32_n256_k2048_dequant_kernel(
-    uint8_t *, void *, int32_t, int32_t);
-extern "C" int32_t tl_walkthrough_q4_m32_n256_k2048_compute_kernel(
-    void *, void *, uint32_t *, void *, float *, int32_t);
+extern "C" int32_t tl_walkthrough_q4_m32_n256_k2048_pack_kernel(float *, void *,
+                                                                uint32_t *);
+extern "C" int32_t tl_walkthrough_q4_m32_n256_k2048_dequant_kernel(uint8_t *,
+                                                                   void *,
+                                                                   int32_t,
+                                                                   int32_t);
+extern "C" int32_t
+tl_walkthrough_q4_m32_n256_k2048_compute_kernel(void *, void *, uint32_t *,
+                                                void *, float *, int32_t);
 
 #ifndef TL_Q4_HMX_ENABLED
 #define TL_Q4_HMX_ENABLED 0
@@ -63,14 +66,13 @@ struct dequant_work {
   int rc[MAX_WORKERS];
 };
 
-static void dequant_worker(
-    unsigned int workers, unsigned int worker, void *opaque) {
+static void dequant_worker(unsigned int workers, unsigned int worker,
+                           void *opaque) {
   struct dequant_work *work = (struct dequant_work *)opaque;
   const int begin = (int)(((uint64_t)work->tiles * worker) / workers);
   const int end = (int)(((uint64_t)work->tiles * (worker + 1u)) / workers);
-  work->rc[worker] =
-      tl_walkthrough_q4_m32_n256_k2048_dequant_kernel(
-          work->weight, work->weight_hmx, begin, end);
+  work->rc[worker] = tl_walkthrough_q4_m32_n256_k2048_dequant_kernel(
+      work->weight, work->weight_hmx, begin, end);
 }
 
 static int matches(const struct tl_op_ctx *o) {
@@ -110,8 +112,7 @@ static int run(const struct tl_op_ctx *o) {
   void *output_hmx = (void *)cursor;
   cursor += kOutputCroutonBytes;
 
-  const uintptr_t stage1_addr =
-      align_down(vtcm_end - kWeightStageBytes, 128u);
+  const uintptr_t stage1_addr = align_down(vtcm_end - kWeightStageBytes, 128u);
   const uintptr_t stage0_addr =
       align_down(stage1_addr - kWeightStageBytes, 128u);
   if (stage0_addr < cursor) {
@@ -127,14 +128,9 @@ static int run(const struct tl_op_ctx *o) {
   int pending_dma = 0;
   auto push_weight = [&](int chunk) {
     const bool pushed =
-        o->dma.push_2d(
-            o->dma.queue,
-            weight_stage[chunk & 1],
-            weight + (size_t)chunk * kWeightSourceBytes,
-            640u,
-            576u,
-            576u,
-            (uint32_t)kTiles) == 0;
+        o->dma.push_2d(o->dma.queue, weight_stage[chunk & 1],
+                       weight + (size_t)chunk * kWeightSourceBytes, 640u, 576u,
+                       576u, (uint32_t)kTiles) == 0;
     pending_dma += pushed ? 1 : 0;
     return pushed;
   };
@@ -176,20 +172,15 @@ static int run(const struct tl_op_ctx *o) {
     work.weight = weight_stage[chunk & 1];
     work.weight_hmx = weight_hmx;
     work.tiles = kTiles;
-    rc = o->parallel.run(
-        o->parallel.pool, dequant_worker, &work, workers);
+    rc = o->parallel.run(o->parallel.pool, dequant_worker, &work, workers);
     for (unsigned int worker = 0; worker < workers && rc == 0; ++worker) {
       rc = work.rc[worker];
     }
 
     if (rc == 0) {
       rc = tl_walkthrough_q4_m32_n256_k2048_compute_kernel(
-          activation_hmx,
-          weight_hmx,
-          bias_vtcm,
-          output_hmx,
-          o->dst + (size_t)chunk * kChunkN,
-          o->dst_stride);
+          activation_hmx, weight_hmx, bias_vtcm, output_hmx,
+          o->dst + (size_t)chunk * kChunkN, o->dst_stride);
     }
     if (rc == 0 && chunk + 2 < chunks && !push_weight(chunk + 2)) {
       rc = -1;

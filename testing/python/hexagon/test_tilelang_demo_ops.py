@@ -1,4 +1,5 @@
 """Host lowering contracts for Hexagon demo operators and layout copies."""
+
 import os
 import pytest
 import tilelang
@@ -21,6 +22,7 @@ def make_reduce_probe(rows, cols, dtype="float32"):
             for i in T.serial(rows):
                 O[0, i] = sums[i]
                 O[1, i] = maxima[i]
+
     return reduce_probe
 
 
@@ -29,25 +31,24 @@ def make_weight_copy_probe(cols, start=64, workers=1):
     # Two N tiles distinguish weight-transposed from the equivalent
     # activation-transposed layout of a single N tile.
     emitter = HMXIntrinEmitter(32, 64, cols, b_transposed=True)
+
     @T.prim_func
-    def weight_copy(X: T.Tensor((64, cols + 64), "float16"),
-                    O: T.Tensor((64, cols + 4), "float16")):
+    def weight_copy(X: T.Tensor((64, cols + 64), "float16"), O: T.Tensor((64, cols + 4), "float16")):
         with T.Kernel(1, threads=1):
             native = T.alloc_shared((64, cols), "float16", align=2048)
             T.annotate_layout({native: emitter.weight_layout(native)})
             for i, j in T.Parallel(64, cols + 4):
                 O[i, j] = T.float16(8192)
-            T.copy(X[:, start:start + cols], native,
-                   annotations={"hexagon.copy_workers": workers} if workers > 1 else {})
-            T.copy(native, O[:, 2:cols + 2])
+            T.copy(X[:, start : start + cols], native, annotations={"hexagon.copy_workers": workers} if workers > 1 else {})
+            T.copy(native, O[:, 2 : cols + 2])
+
     return weight_copy
 
 
 def lower(func):
     target = determine_target("hexagon", return_object=True)
     with target:
-        return str(tilelang.lower(func, target=target, enable_host_codegen=False,
-                                  enable_device_compile=False).kernel_source)
+        return str(tilelang.lower(func, target=target, enable_host_codegen=False, enable_device_compile=False).kernel_source)
 
 
 @pytest.mark.parametrize("kind", ["add", "mul", "scale"])
@@ -123,20 +124,23 @@ def test_gemm_fused_parallel_layout_copies_remain_dsl():
     assert "demo_parallel_pack" not in source
 
 
-@pytest.mark.skipif(os.environ.get("TL_HEXAGON_DEVICE_TEST") != "1",
-                    reason="requires an authorized Hexagon device and SDK")
+@pytest.mark.skipif(os.environ.get("TL_HEXAGON_DEVICE_TEST") != "1", reason="requires an authorized Hexagon device and SDK")
 @pytest.mark.parametrize("width", [32, 96, 128, 160, 2048])
 def test_tiled_rmsnorm_vector_partials_cover_full_width(width):
     import torch
     from tilelang import tvm
+
     fn = make_map_tiled(8, width, "rmsnorm", 2, 2, num_workers=2)
     # The comparison harness supplies a common X/Y/O interface, but unary
     # kernels do not use Y. Match its adapter before direct FastRPC compilation.
     unused = fn.params[1]
     fn = tvm.tirx.PrimFunc(
-        [fn.params[0], fn.params[2]], fn.body, fn.ret_type,
+        [fn.params[0], fn.params[2]],
+        fn.body,
+        fn.ret_type,
         {p: b for p, b in fn.buffer_map.items() if not p.same_as(unused)},
-        fn.attrs, fn.span,
+        fn.attrs,
+        fn.span,
     )
     kernel = tilelang.compile(fn, out_idx=[1], target="hexagon")
     try:
@@ -153,8 +157,8 @@ def test_tiled_rmsnorm_vector_partials_cover_full_width(width):
 
 def test_wide_gemm_keeps_single_raw_slot_within_vtcm_budget():
     import re
-    source = lower(make_gemm_f16_io(256, 2048, 2048, 512,
-                                    copy_workers=6, fused_copy=True))
+
+    source = lower(make_gemm_f16_io(256, 2048, 2048, 512, copy_workers=6, fused_copy=True))
     high = max(map(int, re.findall(r"tl_vtcm_shared_high_water = (\d+)u", source)))
     assert high <= 8 * 1024 * 1024
     assert "tl_dma_async.wait(0)" in source
@@ -164,23 +168,27 @@ def test_wide_gemm_keeps_single_raw_slot_within_vtcm_budget():
 @pytest.mark.parametrize("workers", [0, 7])
 def test_parallel_copy_rejects_bad_worker_count(workers):
     e = HMXIntrinEmitter(32, 32, 64)
+
     @T.prim_func
     def probe(A: T.Tensor((32, 64), "float16")):
         with T.Kernel(1, threads=1):
             native = T.alloc_shared((32, 64), "float16")
             T.annotate_layout({native: e.activation_layout(native)})
             T.copy(A, native, annotations={"hexagon.copy_workers": workers})
+
     with pytest.raises(Exception, match="copy_workers must be"):
         lower(probe)
 
 
 def test_parallel_copy_cannot_nest_worker_dispatch():
     e = HMXIntrinEmitter(32, 32, 64)
+
     @T.prim_func
     def probe(A: T.Tensor((32, 64), "float16")):
         with T.Kernel(1, threads=1, num_workers=2):
             native = T.alloc_shared((32, 64), "float16")
             T.annotate_layout({native: e.activation_layout(native)})
             T.copy(A, native, annotations={"hexagon.copy_workers": 2})
+
     with pytest.raises(Exception, match="cannot nest"):
         lower(probe)

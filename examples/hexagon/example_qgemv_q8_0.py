@@ -34,17 +34,11 @@ def pack_weight_tile(q: np.ndarray, scales: np.ndarray) -> np.ndarray:
 
     staged = np.zeros(layout.staged_weight_bytes(k), dtype=np.uint8)
     for kt in range(layout.k_tiles(k)):
-        tile = staged[
-            kt * layout.staged_tile_bytes : (kt + 1) * layout.staged_tile_bytes
-        ]
+        tile = staged[kt * layout.staged_tile_bytes : (kt + 1) * layout.staged_tile_bytes]
         block = q[:, kt * layout.block_k : (kt + 1) * layout.block_k]
         for pair in range(layout.block_k // 2):
-            tile[pair * 64 : (pair + 1) * 64] = block[
-                :, 2 * pair : 2 * pair + 2
-            ].reshape(-1).view(np.uint8)
-        tile[layout.quant_bytes : layout.source_tile_bytes] = np.ascontiguousarray(
-            scales[:, kt]
-        ).view(np.uint8)
+            tile[pair * 64 : (pair + 1) * 64] = block[:, 2 * pair : 2 * pair + 2].reshape(-1).view(np.uint8)
+        tile[layout.quant_bytes : layout.source_tile_bytes] = np.ascontiguousarray(scales[:, kt]).view(np.uint8)
     return staged
 
 
@@ -63,18 +57,12 @@ def pack_activation_tile(q: np.ndarray, scales: np.ndarray) -> np.ndarray:
 
     staged = np.zeros(layout.staged_activation_bytes(k), dtype=np.uint8)
     for kt in range(layout.k_tiles(k)):
-        tile = staged[
-            kt * layout.staged_tile_bytes : (kt + 1) * layout.staged_tile_bytes
-        ]
+        tile = staged[kt * layout.staged_tile_bytes : (kt + 1) * layout.staged_tile_bytes]
         block = q[kt * layout.block_k : (kt + 1) * layout.block_k]
         for group in range(8):
             replicated = np.tile(block[group * 4 : group * 4 + 4], layout.block_n)
-            tile[group * layout.hvx_bytes : (group + 1) * layout.hvx_bytes] = (
-                replicated.view(np.uint8)
-            )
-        tile[layout.quant_bytes : layout.staged_tile_bytes] = np.full(
-            64, scales[kt], dtype=np.float16
-        ).view(np.uint8)
+            tile[group * layout.hvx_bytes : (group + 1) * layout.hvx_bytes] = replicated.view(np.uint8)
+        tile[layout.quant_bytes : layout.staged_tile_bytes] = np.full(64, scales[kt], dtype=np.float16).view(np.uint8)
     return staged
 
 
@@ -89,12 +77,8 @@ def reference(
     out = np.asarray(bias, dtype=np.float32).copy()
     for kt in range(layout.k_tiles(weight_q.shape[1])):
         k0 = kt * layout.block_k
-        dot = weight_q[:, k0 : k0 + layout.block_k].astype(np.int32) @ activation_q[
-            k0 : k0 + layout.block_k
-        ].astype(np.int32)
-        out += dot.astype(np.float32) * weight_scales[:, kt].astype(
-            np.float32
-        ) * np.float32(activation_scales[kt])
+        dot = weight_q[:, k0 : k0 + layout.block_k].astype(np.int32) @ activation_q[k0 : k0 + layout.block_k].astype(np.int32)
+        out += dot.astype(np.float32) * weight_scales[:, kt].astype(np.float32) * np.float32(activation_scales[kt])
     return out
 
 
@@ -112,11 +96,7 @@ def main() -> None:
     activation_q = rng.integers(-96, 96, size=(k,), dtype=np.int8)
     weight_scales = (rng.random((32, k // 32)) * 0.02 + 0.001).astype(np.float16)
     activation_scales = (rng.random(k // 32) * 0.02 + 0.001).astype(np.float16)
-    bias = (
-        np.zeros(32, dtype=np.float32)
-        if args.no_bias
-        else rng.standard_normal(32).astype(np.float32)
-    )
+    bias = np.zeros(32, dtype=np.float32) if args.no_bias else rng.standard_normal(32).astype(np.float32)
 
     packed_weight = pack_weight_tile(weight_q, weight_scales)
     packed_activation = pack_activation_tile(activation_q, activation_scales)
@@ -133,10 +113,7 @@ def main() -> None:
     max_abs = (out - ref_t).abs().max().item()
     max_rel = ((out - ref_t).abs() / ref_t.abs().clamp_min(1.0)).max().item()
     passed = torch.allclose(out, ref_t, rtol=3e-4, atol=3e-3)
-    print(
-        f"Q8_0 dot 32x{k}: max_abs={max_abs:.6g} max_rel={max_rel:.6g} "
-        f"({'PASS' if passed else 'FAIL'})"
-    )
+    print(f"Q8_0 dot 32x{k}: max_abs={max_abs:.6g} max_rel={max_rel:.6g} ({'PASS' if passed else 'FAIL'})")
     if not passed:
         raise SystemExit(1)
 

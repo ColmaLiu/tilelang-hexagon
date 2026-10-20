@@ -9,9 +9,9 @@ from tilelang.hexagon import _fastrpc
 from tilelang.utils.target import determine_target
 
 
-DMA_TEMPLATE = (
-    Path(__file__).resolve().parents[3] / "src/tl_templates/hexagon/dma.h"
-)
+DMA_TEMPLATE = Path(__file__).resolve().parents[3] / "src/tl_templates/hexagon/dma.h"
+
+
 def _lower_source(prim_func):
     target = determine_target("hexagon", return_object=True)
     with tvm.target.Target(target):
@@ -30,7 +30,7 @@ def _make_worker_dma_probe():
         A: T.Tensor((2, 2048), "float16"),
         B: T.Tensor((2, 2048), "float16"),
     ):
-        with T.Kernel(2, threads=1, num_workers=2) as bx:
+        with T.Kernel(2, threads=1, num_workers=2) as _bx:
             T.call_extern("uint32", "tl_hexagon_dma_poll")
 
     return worker_dma_probe
@@ -52,9 +52,7 @@ def test_hexagon_dma_rejects_worker_pool_until_channels_are_worker_local():
 
 def test_hexagon_dma_raw_value_call_is_not_treated_as_status_code():
     source = _lower_source(_make_dma_raw_poll_probe())
-    call_line = next(
-        line.strip() for line in source.splitlines() if "tl_hexagon_dma_poll" in line
-    )
+    call_line = next(line.strip() for line in source.splitlines() if "tl_hexagon_dma_poll" in line)
 
     assert call_line == "tl_hexagon_dma_poll();"
 
@@ -99,9 +97,7 @@ def test_hexagon_dma_template_exposes_reusable_primitive_layers():
         "tl_hexagon_dma_queue_flush",
     ]
 
-    for primitive in (
-        instruction_primitives + descriptor_primitives + queue_primitives
-    ):
+    for primitive in instruction_primitives + descriptor_primitives + queue_primitives:
         assert re.search(rf"\b{primitive}\s*\(", source), primitive
     assert "sizeof(tl_hexagon_dma_descriptor_1d) == 16" in source
     assert "sizeof(tl_hexagon_dma_descriptor_2d) == 32" in source

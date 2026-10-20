@@ -3,6 +3,7 @@
 Fixed seed, so A.bin/B.bin/ref.npy are reproducible.  Run by reproduce.sh before
 the device run; verify.py compares the device C.bin against ref.npy.
 """
+
 import os
 
 import numpy as np

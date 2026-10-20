@@ -108,8 +108,8 @@ briefing。目标读者是一个要继续"反思 tilelang↔Hexagon 的对接设
 **本 session 已拿到的实战收益(非 tilelang,但把差距压小了)** [实测]:
 - **lm_head 搬回 NPU:decode +80%**(Q4_0 @d1024 33.2→54.8)。ggml-hexagon 有一句
   `if (src0->ne[1] > 32768) return false; // hardcoded limit to refuse the lm-head for now`
-  (`ggml/src/ggml-hexagon/ggml-hexagon.cpp:2797`)把 65536 词表的 lm_head 赶去 CPU。改成 `131072`
-  + `--token-embedding-type q8_0`(让它是 HTP 能 repack 的类型)→ 上 NPU。**两法验证**(CPU 线程扩展
+  (`ggml/src/ggml-hexagon/ggml-hexagon.cpp:2797`)把 65536 词表的 lm_head 赶去 CPU。改成 `131072` +
+  `--token-embedding-type q8_0`(让它是 HTP 能 repack 的类型)→ 上 NPU。**两法验证**(CPU 线程扩展
   16.9→35.6 tok/s + NPU profile 实测 1.43ms/次):同一 GEMV,**NPU 比 CPU 快 8.7×**。输出文本正确。
   → 这是可提上游的 patch(注释自己写着"for now")。**对 8-bit(Q8_0)同样有效**(设备上有 `Q8_0-embq8.gguf`)。
 - **`GGML_HEXAGON_OPPOLL=1`(忙轮询同步):轻载 +18%**(消掉主机等 DSP 完成的中断唤醒延迟)。
@@ -161,7 +161,7 @@ briefing。目标读者是一个要继续"反思 tilelang↔Hexagon 的对接设
 
 **现有对接的状态与局限(反思):**
 - ✅ bridge(Mode B,骑资源)是真正可复用、可移植的核心。
-- ⚠️ **只拦 prefill**(`hmx_mm_2d_f32`)。**decode(M=1 GEMV)走的是另一条 HVX 路径,当前完全没对接** —— 
+- ⚠️ **只拦 prefill**(`hmx_mm_2d_f32`)。**decode(M=1 GEMV)走的是另一条 HVX 路径,当前完全没对接** ——
   接手方要**找到 decode GEMV 的对接 seam**(见 §7 #4)。
 - ⚠️ 是 **q4_0** 的,且当前只是 **correctness/integration PoC**。显式 dequant/HMX atom 版本在
   LFM2 `pp32` 为 2.85 t/s,stock 为 590.33 t/s,远未达到 parity。文中更早的 parity 结论属于

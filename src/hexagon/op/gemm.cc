@@ -32,16 +32,18 @@ struct Gemm {
     // Route to HMX only for the validated GemmHMX surface: fp16, 32-multiple,
     // 2D, shared-shared (SS), overwrite (clear_accum is true). Logical operand
     // transposes are represented by composing the corresponding Crouton layout.
-    // Everything else falls back to the scalar loop hexagon-clang auto-vectorizes
-    // onto HVX — crucially the DEFAULT clear_accum=false (the accumulate K-loop
-    // pattern) and fragment/sub-rank operands, which GemmHMX can't lower yet.
+    // Everything else falls back to the scalar loop hexagon-clang
+    // auto-vectorizes onto HVX — crucially the DEFAULT clear_accum=false (the
+    // accumulate K-loop pattern) and fragment/sub-rank operands, which GemmHMX
+    // can't lower yet.
     bool hmx_ok = op.a_->dtype == DataType::Float(16) &&
                   op.b_->dtype == DataType::Float(16) &&
                   op.c_->dtype == DataType::Float(16) && op.m_ % 32 == 0 &&
-                  op.n_ % 32 == 0 && op.k_ % 32 == 0 && op.a_->shape.size() == 2 &&
-                  op.b_->shape.size() == 2 && op.c_->shape.size() == 2 &&
-                  IsSharedBuffer(op.a_) && IsSharedBuffer(op.b_) &&
-                  IsSharedBuffer(op.c_) && is_one(op.clearAccum_);
+                  op.n_ % 32 == 0 && op.k_ % 32 == 0 &&
+                  op.a_->shape.size() == 2 && op.b_->shape.size() == 2 &&
+                  op.c_->shape.size() == 2 && IsSharedBuffer(op.a_) &&
+                  IsSharedBuffer(op.b_) && IsSharedBuffer(op.c_) &&
+                  is_one(op.clearAccum_);
     return hmx_ok ? String(kHexagonHMX) : String(kHexagonScalar);
   }
 

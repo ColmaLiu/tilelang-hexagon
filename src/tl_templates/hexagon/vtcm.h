@@ -3,16 +3,17 @@
 //
 // Buffers with storage scope `shared` (alloc_shared) are placed in VTCM rather
 // than on the stack, because the HMX matrix engine reads its operands from VTCM
-// (`mxmem`) and HVX wants the tightly-coupled scratch.  The codegen assigns each
-// shared buffer a compile-time byte offset into one session-acquired VTCM region
-// and emits `(T*)((char*)tl_vtcm_base() + offset)`.
+// (`mxmem`) and HVX wants the tightly-coupled scratch.  The codegen assigns
+// each shared buffer a compile-time byte offset into one session-acquired VTCM
+// region and emits `(T*)((char*)tl_vtcm_base() + offset)`.
 //
 // One acquisition is held for the whole FastRPC session (idempotent, lazy on
 // first use); the bump offsets are emitted by the codegen, so this header only
 // owns the acquire/release of the region itself.
 //
-// Compiled into the FastRPC skel (.cc) with the Hexagon SDK on the include path;
-// it pulls in HAP headers, so it is only included when a kernel uses shared mem.
+// Compiled into the FastRPC skel (.cc) with the Hexagon SDK on the include
+// path; it pulls in HAP headers, so it is only included when a kernel uses
+// shared mem.
 #include <HAP_compute_res.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -24,8 +25,9 @@ static unsigned int tl_vtcm_total; // bytes acquired (capacity guard)
 static int tl_vtcm_ctx;            // HAP_compute_res handle
 
 // Static alloc_shared VTCM usage of the current serial kernel, in bytes from
-// tl_vtcm_base_ptr. Codegen publishes this for embedding/export capacity checks.
-// Worker kernels instead carry a private region stride and do not write it.
+// tl_vtcm_base_ptr. Codegen publishes this for embedding/export capacity
+// checks. Worker kernels instead carry a private region stride and do not write
+// it.
 static unsigned int tl_vtcm_shared_high_water;
 
 // HMX mxmem addresses are Crouton-tile addresses: the low 11 bits are not a
@@ -35,9 +37,8 @@ static unsigned int tl_vtcm_shared_high_water;
 
 TL_VTCM_INLINE int tl_vtcm_bind_region(void *base, unsigned int size) {
   uintptr_t raw = (uintptr_t)base;
-  uintptr_t aligned =
-      (raw + TL_VTCM_HMX_ALIGNMENT - 1u) &
-      ~(uintptr_t)(TL_VTCM_HMX_ALIGNMENT - 1u);
+  uintptr_t aligned = (raw + TL_VTCM_HMX_ALIGNMENT - 1u) &
+                      ~(uintptr_t)(TL_VTCM_HMX_ALIGNMENT - 1u);
   size_t padding = (size_t)(aligned - raw);
   if (!base || padding >= (size_t)size) {
     tl_vtcm_base_ptr = 0;
@@ -49,9 +50,9 @@ TL_VTCM_INLINE int tl_vtcm_bind_region(void *base, unsigned int size) {
   return 0;
 }
 
-// Acquire the full VTCM region once.  Idempotent: a second call is a no-op while
-// a region is held, so alloc_shared kernels and (later) the HMX path can share
-// the same arena without double-acquiring.
+// Acquire the full VTCM region once.  Idempotent: a second call is a no-op
+// while a region is held, so alloc_shared kernels and (later) the HMX path can
+// share the same arena without double-acquiring.
 TL_VTCM_INLINE void tl_vtcm_acquire(void) {
   if (tl_vtcm_base_ptr)
     return;
@@ -81,8 +82,9 @@ TL_VTCM_INLINE void tl_vtcm_release(void) {
 }
 
 // Base of the VTCM arena (lazily acquires on first use).  Returns NULL if VTCM
-// could not be acquired — generated code that dereferences it would fault, which
-// is the intended loud failure (a kernel that needs VTCM and can't get it).
+// could not be acquired — generated code that dereferences it would fault,
+// which is the intended loud failure (a kernel that needs VTCM and can't get
+// it).
 TL_VTCM_INLINE void *tl_vtcm_base(void) {
   tl_vtcm_acquire();
   return tl_vtcm_base_ptr;

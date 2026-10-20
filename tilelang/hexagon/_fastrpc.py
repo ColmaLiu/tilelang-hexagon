@@ -13,7 +13,6 @@ Dependency-light: only stdlib + numpy (for itemsize/shape products).
 
 from __future__ import annotations
 
-import math
 import os
 from dataclasses import dataclass
 
@@ -54,12 +53,12 @@ def _nbytes(param) -> int:
 class BufferPlan:
     """Marshaling plan for one kernel parameter."""
 
-    index: int           # position in the kernel signature
-    name: str            # p0, p1, ... or s0, s1, ...
+    index: int  # position in the kernel signature
+    name: str  # p0, p1, ... or s0, s1, ...
     is_scalar: bool
     is_output: bool
     ctype: str
-    nbytes: int          # for buffers
+    nbytes: int  # for buffers
 
 
 def _plan(params, result_idx) -> list[BufferPlan]:
@@ -127,8 +126,7 @@ def gen_dsp(iface: str, kernel_name: str, kernel_source: str, plans: list[Buffer
     # The worker-pool header (qurt threads) is pulled in transitively by hmx.h for
     # the multithreaded HMX path; include it directly for a non-HMX worker kernel
     # (keyed on the public symbol prefix or a direct tl_parallel call).
-    uses_worker = ("tl_hexagon_worker" in kernel_source
-                   or "tl_parallel" in kernel_source) and not hmx
+    uses_worker = ("tl_hexagon_worker" in kernel_source or "tl_parallel" in kernel_source) and not hmx
     worker_include = "#include <tl_templates/hexagon/worker.h>\n" if uses_worker else ""
     # HVX map/reduce math primitives (exp2/recip/rsqrt/reduce) — pulled in when a
     # kernel references the `tl_hvx` prefix (self-contained, needs only -mhvx).
@@ -142,18 +140,11 @@ def gen_dsp(iface: str, kernel_name: str, kernel_source: str, plans: list[Buffer
     # helpers; keep detection separate so a dot-only kernel does not depend on
     # spelling an internal tl_hvx_* symbol in generated source.
     uses_qgemv = "tl_hexagon_q8_0_dot" in kernel_source
-    qgemv_include = (
-        "#include <tl_templates/hexagon/qgemv.h>\n" if uses_qgemv else ""
-    )
+    qgemv_include = "#include <tl_templates/hexagon/qgemv.h>\n" if uses_qgemv else ""
     # Register-granular activation-pack and Q4 dequant atoms used by the
     # explicit HMX qmatmul schedule.
-    uses_qmatmul = (
-        "tl_hexagon_hmx_pack_a_f32_pair_k32" in kernel_source
-        or "tl_hexagon_q4_0_" in kernel_source
-    )
-    qmatmul_include = (
-        "#include <tl_templates/hexagon/qmatmul.h>\n" if uses_qmatmul else ""
-    )
+    uses_qmatmul = "tl_hexagon_hmx_pack_a_f32_pair_k32" in kernel_source or "tl_hexagon_q4_0_" in kernel_source
+    qmatmul_include = "#include <tl_templates/hexagon/qmatmul.h>\n" if uses_qmatmul else ""
     # Acquire/release the HMX session at _open/_close (the matmul also inits
     # lazily, but _close MUST deinit or VTCM/HMX/power leak for the agent's life).
     # tl_hmx_session_deinit already releases VTCM, so the standalone vtcm_close /
@@ -190,7 +181,7 @@ def gen_dsp(iface: str, kernel_name: str, kernel_source: str, plans: list[Buffer
         "    return tl_rc == 0 ? AEE_SUCCESS : AEE_EFAILED;\n"
         "  }\n"
         "}\n\n"
-        "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n"
+        '#ifdef __cplusplus\nextern "C" {\n#endif\n\n'
         f"AEEResult {iface}_open(const char* uri, remote_handle64* h) {{ (void)uri; *h = 0; {hmx_open}{hmx_check}{vtcm_check}return AEE_SUCCESS; }}\n"
         f"AEEResult {iface}_close(remote_handle64 h) {{ (void)h; {hmx_close}{vtcm_close}return AEE_SUCCESS; }}\n\n"
         f"AEEResult {iface}_run({', '.join(skel_args)}) {{\n"
@@ -211,16 +202,12 @@ def gen_host(iface: str, plans: list[BufferPlan]) -> str:
         elif pl.is_output:
             calls.append(f"{pl.name}")
             calls.append(f"{pl.nbytes}")
-            reads.append(
-                f"  unsigned char* {pl.name} = (unsigned char*)malloc({pl.nbytes});\n"
-                f'  const char* {pl.name}_path = argv[{argv}];')
+            reads.append(f"  unsigned char* {pl.name} = (unsigned char*)malloc({pl.nbytes});\n  const char* {pl.name}_path = argv[{argv}];")
             writes.append(f"  writefile({pl.name}_path, {pl.name}, {pl.nbytes});")
             frees.append(f"  free({pl.name});")
             argv += 1
         else:
-            reads.append(
-                f"  long {pl.name}_len = 0;\n"
-                f"  unsigned char* {pl.name} = readfile(argv[{argv}], &{pl.name}_len);")
+            reads.append(f"  long {pl.name}_len = 0;\n  unsigned char* {pl.name} = readfile(argv[{argv}], &{pl.name}_len);")
             calls.append(f"{pl.name}")
             calls.append(f"(int){pl.name}_len")
             frees.append(f"  free({pl.name});")
@@ -236,7 +223,7 @@ def gen_host(iface: str, plans: list[BufferPlan]) -> str:
         '  FILE* f = fopen(path, "rb"); if (!f) { fprintf(stderr, "open %s failed\\n", path); exit(2); }\n'
         "  fseek(f, 0, SEEK_END); *len = ftell(f); fseek(f, 0, SEEK_SET);\n"
         "  unsigned char* b = (unsigned char*)malloc(*len);\n"
-        "  if (fread(b, 1, *len, f) != (size_t)*len) { fprintf(stderr, \"read failed\\n\"); exit(2); }\n"
+        '  if (fread(b, 1, *len, f) != (size_t)*len) { fprintf(stderr, "read failed\\n"); exit(2); }\n'
         "  fclose(f); return b;\n}\n\n"
         "static void writefile(const char* path, const unsigned char* b, int len) {\n"
         '  FILE* f = fopen(path, "wb"); if (!f) { fprintf(stderr, "write %s failed\\n", path); exit(2); }\n'
@@ -257,12 +244,9 @@ def gen_host(iface: str, plans: list[BufferPlan]) -> str:
         "  return 0;\n}\n\n"
         "int main(int argc, char** argv) {\n"
         "  (void)argc;\n"
-        "  if (open_session(CDSP_DOMAIN_ID) != 0) return 1;\n"
-        + "\n".join(reads) + "\n"
-        + f"  int e = {iface}_run({', '.join(calls)});\n"
+        "  if (open_session(CDSP_DOMAIN_ID) != 0) return 1;\n" + "\n".join(reads) + "\n" + f"  int e = {iface}_run({', '.join(calls)});\n"
         '  if (e != AEE_SUCCESS) { fprintf(stderr, "run failed: 0x%x\\n", e); }\n'
-        "  else {\n" + "\n".join(writes) + "\n  }\n"
-        + "\n".join(frees) + "\n"
+        "  else {\n" + "\n".join(writes) + "\n  }\n" + "\n".join(frees) + "\n"
         f"  {iface}_close(g_handle);\n"
         "  return e ? 1 : 0;\n}\n"
     )
@@ -285,8 +269,9 @@ def gen_agent(iface: str, plans: list[BufferPlan]) -> str:
             raise NotImplementedError("scalar params over the agent are not wired yet")
         allocs.append(
             f"  unsigned char* rbuf_{pl.name} = (unsigned char*)rpcmem_alloc(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, {pl.nbytes});\n"
-            f"  if (!rbuf_{pl.name}) {{ fprintf(stderr, \"rpcmem_alloc failed\\n\"); return 3; }}\n"
-            f"  memset(rbuf_{pl.name}, 0, {pl.nbytes});  // avoid garbage if a buffer is masked-out before first send")
+            f'  if (!rbuf_{pl.name}) {{ fprintf(stderr, "rpcmem_alloc failed\\n"); return 3; }}\n'
+            f"  memset(rbuf_{pl.name}, 0, {pl.nbytes});  // avoid garbage if a buffer is masked-out before first send"
+        )
         frees.append(f"  rpcmem_free(rbuf_{pl.name});")
         calls.append(f"rbuf_{pl.name}")
         calls.append(f"{pl.nbytes}")
@@ -381,8 +366,7 @@ int main(int argc, char** argv) {{
 """
 
 
-def gen_cmake(iface: str, template_dir: str, with_agent: bool = True,
-              async_dma: bool = False) -> str:
+def gen_cmake(iface: str, template_dir: str, with_agent: bool = True, async_dma: bool = False) -> str:
     # Mirrors mini-htp/CMakeLists.txt: host exe (stub + driver) and DSP skel
     # (skel + impl, compiled with HVX/HMX enabled).  ``template_dir`` is the
     # parent of ``tl_templates`` so the kernel's <tl_templates/hexagon/...>
@@ -390,7 +374,9 @@ def gen_cmake(iface: str, template_dir: str, with_agent: bool = True,
     # The persistent agent target is emitted only when the kernel is agent-eligible.
     # Scope-based queue cleanup must not import an unavailable DSP C++ unwinder.
     exception_flags = " -fno-exceptions" if async_dma else ""
-    agent_block = ("""
+    agent_block = (
+        (
+            """
     # Persistent agent: same FastRPC stub, served over a TCP socket (reuses the
     # IDL artifacts from IFACE_test, ordered via add_dependencies).
     add_executable(IFACE_agent
@@ -404,7 +390,11 @@ def gen_cmake(iface: str, template_dir: str, with_agent: bool = True,
         target_link_options(IFACE_agent PUBLIC -llog -ldl)
     endif()
     link_custom_library(IFACE_agent ${dsprpc})
-    copy_binaries(IFACE_agent)""".replace("IFACE", iface)) if with_agent else ""
+    copy_binaries(IFACE_agent)""".replace("IFACE", iface)
+        )
+        if with_agent
+        else ""
+    )
     return f"""cmake_minimum_required(VERSION 3.14.3)
 project({iface} C CXX ASM)
 set(CMAKE_C_STANDARD 11)
@@ -463,9 +453,7 @@ def write_project(workdir: str, kernel_name: str, kernel_source: str, params, re
     os.makedirs(workdir, exist_ok=True)
     # The kernel #includes <tl_templates/hexagon/common.h>; resolve via tilelang's
     # canonical template root (works in both source tree and installed wheel).
-    if not TILELANG_TEMPLATE_PATH or not os.path.exists(
-        os.path.join(TILELANG_TEMPLATE_PATH, "tl_templates", "hexagon", "common.h")
-    ):
+    if not TILELANG_TEMPLATE_PATH or not os.path.exists(os.path.join(TILELANG_TEMPLATE_PATH, "tl_templates", "hexagon", "common.h")):
         raise RuntimeError(
             "tilelang Hexagon templates not found under TILELANG_TEMPLATE_PATH="
             f"{TILELANG_TEMPLATE_PATH!r}; set TL_TEMPLATE_PATH to the directory containing "
@@ -481,7 +469,9 @@ def write_project(workdir: str, kernel_name: str, kernel_source: str, params, re
         f"{iface}_dsp.cc": gen_dsp(iface, kernel_name, kernel_source, plans),
         f"{iface}_host.c": gen_host(iface, plans),
         "CMakeLists.txt": gen_cmake(
-            iface, TILELANG_TEMPLATE_PATH, with_agent=with_agent,
+            iface,
+            TILELANG_TEMPLATE_PATH,
+            with_agent=with_agent,
             async_dma="tl_hexagon_dma_async_context<" in kernel_source,
         ),
     }

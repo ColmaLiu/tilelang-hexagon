@@ -19,6 +19,7 @@ against SDK version churn.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -107,7 +108,7 @@ class HexagonSDK:
         return os.path.join(self.cmake_root, "bin", "ninja")
 
     # ---- validation -------------------------------------------------------
-    def validate(self) -> "HexagonSDK":
+    def validate(self) -> HexagonSDK:
         """Raise :class:`HexagonEnvError` if anything required is missing."""
         checks = {
             "Hexagon SDK root": self.sdk_root,
@@ -130,10 +131,8 @@ class HexagonSDK:
         bin_qaic = os.path.join(self.sdk_root, "ipc", "fastrpc", "qaic", "bin", "qaic")
         if not os.path.exists(bin_qaic):
             os.makedirs(os.path.dirname(bin_qaic), exist_ok=True)
-            try:
+            with contextlib.suppress(OSError):
                 os.symlink(os.path.join("..", "Ubuntu", "qaic"), bin_qaic)
-            except OSError:
-                pass
 
     @cached_property
     def environ(self) -> dict[str, str]:
@@ -150,12 +149,13 @@ class HexagonSDK:
         cmd = f'unset HEXAGON_SDK_ROOT DEFAULT_HEXAGON_TOOLS_ROOT; source "{script}" >/dev/null 2>&1; env -0'
         try:
             raw = subprocess.run(
-                ["bash", "-c", cmd], capture_output=True, text=True, timeout=120,
+                ["bash", "-c", cmd],
+                capture_output=True,
+                text=True,
+                timeout=120,
                 stdin=subprocess.DEVNULL,
             ).stdout
-            env = dict(
-                kv.split("=", 1) for kv in raw.split("\0") if "=" in kv
-            )
+            env = dict(kv.split("=", 1) for kv in raw.split("\0") if "=" in kv)
         except Exception:
             env = dict(os.environ)
         if not env.get("HEXAGON_SDK_ROOT"):
@@ -174,12 +174,38 @@ class HexagonSDK:
         # break the Hexagon / Android cross-compilers, which set their own flags
         # via the SDK/NDK toolchain files.
         for var in (
-            "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "FFLAGS", "FCFLAGS",
-            "DEBUG_CFLAGS", "DEBUG_CXXFLAGS", "DEBUG_CPPFLAGS", "DEBUG_FFLAGS",
-            "DEBUG_FCFLAGS", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH",
-            "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "CMAKE_ARGS", "CMAKE_PREFIX_PATH",
-            "CONDA_BUILD_SYSROOT", "CC", "CXX", "CPP", "LD", "AR", "AS", "NM",
-            "RANLIB", "STRIP", "READELF", "OBJCOPY", "OBJDUMP", "ADDR2LINE",
+            "CFLAGS",
+            "CXXFLAGS",
+            "CPPFLAGS",
+            "LDFLAGS",
+            "FFLAGS",
+            "FCFLAGS",
+            "DEBUG_CFLAGS",
+            "DEBUG_CXXFLAGS",
+            "DEBUG_CPPFLAGS",
+            "DEBUG_FFLAGS",
+            "DEBUG_FCFLAGS",
+            "CPATH",
+            "C_INCLUDE_PATH",
+            "CPLUS_INCLUDE_PATH",
+            "OBJC_INCLUDE_PATH",
+            "LIBRARY_PATH",
+            "CMAKE_ARGS",
+            "CMAKE_PREFIX_PATH",
+            "CONDA_BUILD_SYSROOT",
+            "CC",
+            "CXX",
+            "CPP",
+            "LD",
+            "AR",
+            "AS",
+            "NM",
+            "RANLIB",
+            "STRIP",
+            "READELF",
+            "OBJCOPY",
+            "OBJDUMP",
+            "ADDR2LINE",
         ):
             env.pop(var, None)
         return env

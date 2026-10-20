@@ -18,14 +18,14 @@
 static inline int tl_bridge_enter(void *vtcm_base, unsigned int vtcm_size) {
   if (tl_vtcm_bind_region(vtcm_base, vtcm_size) != 0)
     return -1;
-  tl_hmx_fill_unit_scales((uint32_t *)tl_vtcm_base_ptr);  // unit scales @ base+0
-  tl_hmx_inited    = 1;                        // ride the caller's HMX lock
+  tl_hmx_fill_unit_scales((uint32_t *)tl_vtcm_base_ptr); // unit scales @ base+0
+  tl_hmx_inited = 1; // ride the caller's HMX lock
   return 0;
 }
 
 // Unbind (do NOT release VTCM/HMX — the host owns them).
 static inline void tl_bridge_exit(void) {
   tl_vtcm_base_ptr = 0;
-  tl_vtcm_total    = 0;
-  tl_hmx_inited    = 0;
+  tl_vtcm_total = 0;
+  tl_hmx_inited = 0;
 }

@@ -26,9 +26,7 @@ def test_q8_0_dot_atom_hexagon_codegen():
     assert "tl_hexagon_hmx" not in source
 
     nobias = tilelang.compile(
-        make_q8_0_dot_prim_func(
-            2048, symbol="test_qgemv_q8_0_nobias", with_bias=False
-        ),
+        make_q8_0_dot_prim_func(2048, symbol="test_qgemv_q8_0_nobias", with_bias=False),
         out_idx=[2],
         target="hexagon",
     ).get_kernel_source()

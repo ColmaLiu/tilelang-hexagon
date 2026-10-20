@@ -47,8 +47,8 @@ HMX + 更好的调度。**要追平 nexa,战场只有 decode 内核这一个。*
 
 2. **同为 8-bit 时,nexa 的 decode 快 2.6 倍**(69.5 vs Q8_0 的 26.6)—— 比 Q4_0 对比(2 倍)
    差距更大。而且 **nexa 的 8-bit 甚至比 llama.cpp 的 4-bit 还快 2 倍**(69.5 vs 35.6),即便它
-   要多搬一倍的权重字节。**⇒ nexa 的 decode 优势是纯运行时/内核的胜利**(QNN 整图编译 + 静态调度
-   + 大概率用了 HMX,而 llama.cpp 在 decode 时把 HMX 闲置了 95%),与权重位数无关。
+   要多搬一倍的权重字节。**⇒ nexa 的 decode 优势是纯运行时/内核的胜利**(QNN 整图编译 + 静态调度 +
+   大概率用了 HMX,而 llama.cpp 在 decode 时把 HMX 闲置了 95%),与权重位数无关。
 
 3. **prefill 差距小且与量化无关**(Q8_0 3272 ≈ Q4_0 3175,都约为 nexa 的 0.9×)—— prefill 是
    批量计算、走 HMX,这条路 llama.cpp 已经有竞争力。

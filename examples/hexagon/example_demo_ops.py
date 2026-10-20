@@ -21,8 +21,13 @@ def hexreduce(src, dst, rtype, dim):
     NaN propagation is unsupported.
     """
     tirx.call_intrin(
-        "handle", tirx.op.Op.get("tl.tileop.reduce"),
-        to_tile_region(src, "r"), to_tile_region(dst, "w"), rtype, dim, True,
+        "handle",
+        tirx.op.Op.get("tl.tileop.reduce"),
+        to_tile_region(src, "r"),
+        to_tile_region(dst, "w"),
+        rtype,
+        dim,
+        True,
     )
 
 
@@ -34,23 +39,24 @@ def make_elementwise(M, N, kind="add", num_workers=6, scale=0.75, bias=0.125):
         raise ValueError("num_workers must be in [1, 6]")
 
     if kind == "scale":
+
         @T.prim_func
         def scale_bias(X: T.Tensor((M, N), "float32"), O: T.Tensor((M, N), "float32")):
             with T.Kernel(M, threads=1, num_workers=min(M, num_workers)) as row:
                 for j in T.Parallel(N):
                     O[row, j] = X[row, j] * T.float32(scale) + T.float32(bias)
+
         return scale_bias
 
     @T.prim_func
-    def elementwise(X: T.Tensor((M, N), "float32"),
-                    Y: T.Tensor((M, N), "float32"),
-                    O: T.Tensor((M, N), "float32")):
+    def elementwise(X: T.Tensor((M, N), "float32"), Y: T.Tensor((M, N), "float32"), O: T.Tensor((M, N), "float32")):
         with T.Kernel(M, threads=1, num_workers=min(M, num_workers)) as row:
             for j in T.Parallel(N):
                 if kind == "add":
                     O[row, j] = X[row, j] + Y[row, j]
                 else:
                     O[row, j] = X[row, j] * Y[row, j]
+
     return elementwise
 
 
@@ -73,11 +79,11 @@ def make_rmsnorm_fp32(M, N, eps=1e-5, num_workers=6):
             inv[0] = T.rsqrt(total[0] / T.float32(N) + T.float32(eps))
             for j in T.Parallel(N):
                 O[row, j] = X[row, j] * inv[0]
+
     return rmsnorm
 
 
-def make_map_tiled(M, N, kind="add", tile_rows=4, group_tiles=4,
-                   num_workers=6, dma=True, dma_store=False):
+def make_map_tiled(M, N, kind="add", tile_rows=4, group_tiles=4, num_workers=6, dma=True, dma_store=False):
     """Contiguous groups, with optional double-buffered DMA input staging.
 
     Full static tiles are required; callers retain make_elementwise for tails.
@@ -97,9 +103,9 @@ def make_map_tiled(M, N, kind="add", tile_rows=4, group_tiles=4,
 
     @T.macro
     def submit(X, Y, sx, sy, row, slot):
-        T.dma_copy(X[row:row + tile_rows, :], sx[slot, :, :])
+        T.dma_copy(X[row : row + tile_rows, :], sx[slot, :, :])
         if binary:
-            T.dma_copy(Y[row:row + tile_rows, :], sy[slot, :, :])
+            T.dma_copy(Y[row : row + tile_rows, :], sy[slot, :, :])
 
     @T.macro
     def compute(sx, sy, sums, inv, dst, out_row, slot):
@@ -117,9 +123,7 @@ def make_map_tiled(M, N, kind="add", tile_rows=4, group_tiles=4,
                     dst[out_row + r, j] = sx[slot, r, j] * inv[0]
 
     @T.prim_func
-    def map_tiled(X: T.Tensor((M, N), "float32"),
-                  Y: T.Tensor((M, N), "float32"),
-                  O: T.Tensor((M, N), "float32")):
+    def map_tiled(X: T.Tensor((M, N), "float32"), Y: T.Tensor((M, N), "float32"), O: T.Tensor((M, N), "float32")):
         T.func_attr({"hexagon.dma_queue_capacity": 6})
         with T.Kernel(groups, threads=1, num_workers=num_workers) as group:
             sx = T.alloc_shared((2, tile_rows, N), "float32")
@@ -141,9 +145,9 @@ def make_map_tiled(M, N, kind="add", tile_rows=4, group_tiles=4,
                     else:
                         T.dma_wait()
                 else:
-                    T.copy(X[row:row + tile_rows, :], sx[i % 2, :, :])
+                    T.copy(X[row : row + tile_rows, :], sx[i % 2, :, :])
                     if binary:
-                        T.copy(Y[row:row + tile_rows, :], sy[i % 2, :, :])
+                        T.copy(Y[row : row + tile_rows, :], sy[i % 2, :, :])
                 if kind == "rmsnorm":
                     for r in T.serial(tile_rows):
                         # Keep independent sums in vector locals. Only spill
@@ -160,13 +164,14 @@ def make_map_tiled(M, N, kind="add", tile_rows=4, group_tiles=4,
                         sums[r] = row_sum[0]
                 if dma_store:
                     compute(sx, sy, sums, inv, result, 0, i % 2)
-                    T.dma_copy(result, O[row:row + tile_rows, :])
+                    T.dma_copy(result, O[row : row + tile_rows, :])
                     T.dma_wait()
                 else:
                     compute(sx, sy, sums, inv, O, row, i % 2)
                 # The current input slot is dead once the result is computed.
                 if dma and i + 2 < group_tiles:
                     submit(X, Y, sx, sy, (group * group_tiles + i + 2) * tile_rows, i % 2)
+
     return map_tiled
 
 
@@ -190,8 +195,7 @@ def make_gemm_f16_io(M, N, K, BN=128, copy_workers=1, fused_copy=False):
     slots = 1 if BN >= 512 else min(2, count)
 
     @T.prim_func
-    def gemm(A: T.Tensor((M, K), "float32"), W: T.Tensor((N, K), "float16"),
-             C: T.Tensor((M, N), "float32")):
+    def gemm(A: T.Tensor((M, K), "float32"), W: T.Tensor((N, K), "float16"), C: T.Tensor((M, N), "float32")):
         T.func_attr({"hexagon.dma_queue_capacity": 3})
         with T.Kernel(1, threads=1):
             a_dma = T.alloc_shared((M, K), "float32", align=2048)
@@ -205,15 +209,19 @@ def make_gemm_f16_io(M, N, K, BN=128, copy_workers=1, fused_copy=False):
             acc = T.alloc_hmx_accumulator()
             cvt = T.alloc_hmx_convert_state()
             bias_state = T.alloc_hmx_bias_state()
-            T.annotate_layout({a_native: emitter.activation_layout(a_native),
-                               w_native: emitter.weight_layout(w_native),
-                               c_native: emitter.output_layout(c_native)})
+            T.annotate_layout(
+                {
+                    a_native: emitter.activation_layout(a_native),
+                    w_native: emitter.weight_layout(w_native),
+                    c_native: emitter.output_layout(c_native),
+                }
+            )
             for i in T.serial(32):
                 config[i] = T.uint32(0x3C00)
                 config[i + 32] = T.uint32(0)
             T.dma_copy(A, a_dma)
             for ni in T.serial(slots):
-                T.dma_copy(W[ni * BN:(ni + 1) * BN, :], w_dma[ni, :, :])
+                T.dma_copy(W[ni * BN : (ni + 1) * BN, :], w_dma[ni, :, :])
             T.dma_wait(slots)
             if fused_copy:
                 T.copy(a_dma, a_native, annotations=copy_annotations)
@@ -230,8 +238,7 @@ def make_gemm_f16_io(M, N, K, BN=128, copy_workers=1, fused_copy=False):
                     T.dma_wait()
                 T.copy(w_dma[ni % slots, :, :], w_native, annotations=copy_annotations)
                 if ni + slots < count:
-                    T.dma_copy(W[(ni + slots) * BN:(ni + slots + 1) * BN, :],
-                               w_dma[ni % slots, :, :])
+                    T.dma_copy(W[(ni + slots) * BN : (ni + slots + 1) * BN, :], w_dma[ni % slots, :, :])
                 for mt in T.serial(M // 32):
                     for nt in T.serial(BN // 32):
                         emitter.clear(acc)
@@ -239,11 +246,11 @@ def make_gemm_f16_io(M, N, K, BN=128, copy_workers=1, fused_copy=False):
                         emitter.convert(cvt, acc, bias_state, config)
                         emitter.store(cvt, acc, c_native, bias_state, config, mt, nt)
                 if fused_copy:
-                    T.copy(c_native, C[:, ni * BN:(ni + 1) * BN],
-                           annotations=output_annotations)
+                    T.copy(c_native, C[:, ni * BN : (ni + 1) * BN], annotations=output_annotations)
                 else:
                     T.copy(c_native, c_row)
                     for i, j in T.Parallel(M, BN):
                         C[i, ni * BN + j] = T.cast(c_row[i, j], "float32")
             emitter.release(acc)
+
     return gemm

@@ -51,9 +51,7 @@ def emit(k: int, output_dir: Path, *, with_bias: bool) -> None:
         },
     }
     base.with_suffix(".c").write_text(source, encoding="ascii")
-    base.with_suffix(".manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="ascii"
-    )
+    base.with_suffix(".manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="ascii")
     print(f"emitted {base.name}.c")
     print(f"  entry : {manifest['entry']}")
     print(f"  staged: {manifest['staged_weight_bytes']} B weight + activation")

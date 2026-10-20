@@ -13,7 +13,8 @@
 #include <stdint.h>
 
 // These bodies are emitted by emit_qgemv_q8_0.py.  They are ordinary TileLang
-// Hexagon kernels (no FastRPC wrapper) and call the qgemv instruction atom above.
+// Hexagon kernels (no FastRPC wrapper) and call the qgemv instruction atom
+// above.
 #include "kernel_qgemv_q8_0_k2048.c"
 #include "kernel_qgemv_q8_0_k2048_nobias.c"
 #include "kernel_qgemv_q8_0_k8192.c"
@@ -59,25 +60,23 @@ static int tl_qgemv_run(const struct tl_op_ctx *o) {
   int rc;
   if (o->k == 2048) {
     if (o->bias != nullptr) {
-      rc = qgemv_q8_0_k2048_kernel(
-          const_cast<uint8_t *>(o->weight),
-          const_cast<uint8_t *>(o->tiled_act), const_cast<float *>(o->bias),
-          o->dst);
+      rc = qgemv_q8_0_k2048_kernel(const_cast<uint8_t *>(o->weight),
+                                   const_cast<uint8_t *>(o->tiled_act),
+                                   const_cast<float *>(o->bias), o->dst);
     } else {
-      rc = qgemv_q8_0_k2048_nobias_kernel(
-          const_cast<uint8_t *>(o->weight),
-          const_cast<uint8_t *>(o->tiled_act), o->dst);
+      rc = qgemv_q8_0_k2048_nobias_kernel(const_cast<uint8_t *>(o->weight),
+                                          const_cast<uint8_t *>(o->tiled_act),
+                                          o->dst);
     }
   } else if (o->k == 8192) {
     if (o->bias != nullptr) {
-      rc = qgemv_q8_0_k8192_kernel(
-          const_cast<uint8_t *>(o->weight),
-          const_cast<uint8_t *>(o->tiled_act), const_cast<float *>(o->bias),
-          o->dst);
+      rc = qgemv_q8_0_k8192_kernel(const_cast<uint8_t *>(o->weight),
+                                   const_cast<uint8_t *>(o->tiled_act),
+                                   const_cast<float *>(o->bias), o->dst);
     } else {
-      rc = qgemv_q8_0_k8192_nobias_kernel(
-          const_cast<uint8_t *>(o->weight),
-          const_cast<uint8_t *>(o->tiled_act), o->dst);
+      rc = qgemv_q8_0_k8192_nobias_kernel(const_cast<uint8_t *>(o->weight),
+                                          const_cast<uint8_t *>(o->tiled_act),
+                                          o->dst);
     }
   } else {
     return -1;
@@ -85,8 +84,8 @@ static int tl_qgemv_run(const struct tl_op_ctx *o) {
   return rc == 0 ? 0 : -1;
 }
 
-static const struct tl_op_desc tl_qgemv_desc = {
-    "q8_0_dot_32x1", tl_qgemv_matches, tl_qgemv_run};
+static const struct tl_op_desc tl_qgemv_desc = {"q8_0_dot_32x1",
+                                                tl_qgemv_matches, tl_qgemv_run};
 
 __attribute__((constructor)) static void tl_qgemv_register(void) {
   tl_register_op(&tl_qgemv_desc);

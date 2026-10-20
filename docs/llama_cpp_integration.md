@@ -20,7 +20,7 @@ wired into LFM2-1.2B's forward pass, device-validated for correctness.
 > that mention `kernel_qmatmul_compact`, qcm/sc repacking, or `T.gemm` are retained
 > only as a record of the earlier proof.
 
-### Current low-level boundary
+## Current low-level boundary
 
 The current Q4 reference deliberately stops below `T.gemm`:
 
@@ -291,8 +291,8 @@ That is the roadmap from "we proved one kernel runs correctly inside llama.cpp" 
 ### Update — the registry step (done, device-verified)
 
 The first slice of the roadmap is implemented:
-- **Op registry + explicit op-context** — `tl_embed.h` (`tl_op_ctx` + `tl_op_desc`
-  + `tl_dispatch`) replaces the hardcoded `if`. Ops self-register at skel load; the
+- **Op registry + explicit op-context** — `tl_embed.h` (`tl_op_ctx` + `tl_op_desc` +
+  `tl_dispatch`) replaces the hardcoded `if`. Ops self-register at skel load; the
   host builds a ctx and dispatches. Smell **#2 (hardcoded intercept) is fixed**, and
   **#6 (implicit preconditions)** is now an explicit, documented struct.
 - **Reusable shim in the tilelang repo** — `tl_embed.h` (C-safe API) + `tl_bridge.h`
@@ -344,8 +344,6 @@ pre-built runtime is on-device):
    emit one kernel per shape and dispatch by the manifest (the current hand-C adapter
    sidesteps this by looping any shape — the generated kernel does not);
 4. rebuild the `htp-v79` skel, `adb push`, A/B on LFM2.
-
-
 
 The proof kernel is slow by construction (scalar per-call dequant, M-pad). Profiling
 showed the tilelang **HMX gemm itself is ~competitive (≈50 t/s, gemm-limited)** and

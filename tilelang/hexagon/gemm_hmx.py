@@ -72,9 +72,7 @@ class GemmHMX(GemmBase):
             and self._is_full_region(self.BRegion, B_buf)
             and self._is_full_region(self.CRegion, C_buf)
         ):
-            raise NotImplementedError(
-                "GemmHMX requires each GEMM region to span its complete shared buffer"
-            )
+            raise NotImplementedError("GemmHMX requires each GEMM region to span its complete shared buffer")
 
         emitter = self._make_emitter()
 

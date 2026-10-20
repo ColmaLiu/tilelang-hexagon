@@ -8,16 +8,16 @@ Walks one decode token's ops in execution order, assigns each to a layer, and pr
 
 Usage: python3 forward_pass.py <prof_pmu.log>
 """
+
 import re
 import sys
 from collections import defaultdict
 
 LOG = sys.argv[1] if len(sys.argv) > 1 else "/tmp/prof_pmu.log"
-ATTN_LAYERS = {2, 5, 8, 10, 12, 14}          # LFM2: the rest are gated short-conv
+ATTN_LAYERS = {2, 5, 8, 10, 12, 14}  # LFM2: the rest are gated short-conv
 N_LAYERS = 16
 
-pat = re.compile(
-    r"profile-op ([\w+]+)\|([^|]*)\|([^|]*)\|([^|]*)\|[^|]*\|([^|]*)\|usec (\d+) cycles (\d+)")
+pat = re.compile(r"profile-op ([\w+]+)\|([^|]*)\|([^|]*)\|([^|]*)\|[^|]*\|([^|]*)\|usec (\d+) cycles (\d+)")
 
 ops = []
 for line in open(LOG, encoding="latin1"):
@@ -27,9 +27,17 @@ for line in open(LOG, encoding="latin1"):
     if not m:
         continue
     op, names, dims, types, kparams, usec, cyc = m.groups()
-    ops.append({"op": op, "names": names, "dims": dims.split(" -> ")[0].strip(),
-                "dt": types.split(" -> ")[0].strip(),
-                "kern": (kparams.strip() or "-"), "usec": int(usec), "cyc": int(cyc)})
+    ops.append(
+        {
+            "op": op,
+            "names": names,
+            "dims": dims.split(" -> ")[0].strip(),
+            "dt": types.split(" -> ")[0].strip(),
+            "kern": (kparams.strip() or "-"),
+            "usec": int(usec),
+            "cyc": int(cyc),
+        }
+    )
 
 
 def act_ne1(dims):
@@ -43,8 +51,7 @@ def act_ne1(dims):
 # --- isolate one decode token (ne1==1) -------------------------------------
 # a new forward pass starts when the layer index resets; carry layer forward
 def layer_of(names):
-    m = re.search(r"blk\.(\d+)\.", names) or re.search(r"cache_[krv]_l(\d+)", names) \
-        or re.search(r"_l(\d+)\b", names)
+    m = re.search(r"blk\.(\d+)\.", names) or re.search(r"cache_[krv]_l(\d+)", names) or re.search(r"_l(\d+)\b", names)
     return int(m.group(1)) if m else None
 
 
@@ -56,16 +63,16 @@ for o in ops:
     o["L"] = cur if cur is not None else -1
 
 # decode region = after the last batched matmul
-last_pref = max(i for i, o in enumerate(ops)
-                if o["op"].startswith("MUL_MAT") and act_ne1(o["dims"]) > 1)
-dec = ops[last_pref + 1:]
+last_pref = max(i for i, o in enumerate(ops) if o["op"].startswith("MUL_MAT") and act_ne1(o["dims"]) > 1)
+dec = ops[last_pref + 1 :]
 
 # split decode into tokens: a token boundary is where layer goes back to 0 after being high
 toks, cur_tok = [], []
 prev_L = -1
 for o in dec:
     if o["L"] == 0 and prev_L >= N_LAYERS - 3 and cur_tok:
-        toks.append(cur_tok); cur_tok = []
+        toks.append(cur_tok)
+        cur_tok = []
     cur_tok.append(o)
     if o["L"] >= 0:
         prev_L = o["L"]
@@ -76,8 +83,8 @@ toks = [t for t in toks if len(t) > 100]
 tok = sorted(toks, key=len)[len(toks) // 2]
 total = sum(o["usec"] for o in tok)
 
-print(f"# LFM2-1.2B 前向过程(一个 decode token)")
-print(f"# {len(tok)} 个 NPU 算子, DSP 计算合计 {total/1000:.2f} ms\n")
+print("# LFM2-1.2B 前向过程(一个 decode token)")
+print(f"# {len(tok)} 个 NPU 算子, DSP 计算合计 {total / 1000:.2f} ms\n")
 
 
 def show_layer(L, title):
@@ -85,7 +92,7 @@ def show_layer(L, title):
     if not seg:
         return
     t = sum(o["usec"] for o in seg)
-    print(f"── {title}(blk.{L}) — {len(seg)} 算子, {t/1000:.2f} ms ──")
+    print(f"── {title}(blk.{L}) — {len(seg)} 算子, {t / 1000:.2f} ms ──")
     for o in seg:
         w = o["names"].split(" x ")[0].strip()
         w = re.sub(r"blk\.\d+\.", "", w)[:30]
@@ -114,7 +121,7 @@ for L in range(N_LAYERS):
         kind = "attn" if L in ATTN_LAYERS else "conv"
         bar = "█" * int(per[L] / max(per.values()) * 30)
         print(f"   blk.{L:<2} {kind}  {per[L]:>5}us  {bar}")
-print(f"\n   短卷积层 ×{n_conv}: {conv_t/1000:.2f} ms ({100*conv_t/total:.0f}%)  平均 {conv_t/max(n_conv,1)/1000:.2f} ms/层")
-print(f"   注意力层 ×{n_attn}: {attn_t/1000:.2f} ms ({100*attn_t/total:.0f}%)  平均 {attn_t/max(n_attn,1)/1000:.2f} ms/层")
+print(f"\n   短卷积层 ×{n_conv}: {conv_t / 1000:.2f} ms ({100 * conv_t / total:.0f}%)  平均 {conv_t / max(n_conv, 1) / 1000:.2f} ms/层")
+print(f"   注意力层 ×{n_attn}: {attn_t / 1000:.2f} ms ({100 * attn_t / total:.0f}%)  平均 {attn_t / max(n_attn, 1) / 1000:.2f} ms/层")
 other = total - conv_t - attn_t
-print(f"   层外(embedding 等): {other/1000:.2f} ms ({100*other/total:.0f}%)")
+print(f"   层外(embedding 等): {other / 1000:.2f} ms ({100 * other / total:.0f}%)")

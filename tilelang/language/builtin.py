@@ -280,9 +280,7 @@ def hexagon_hmx_release(acc_state):
 def hexagon_hmx_load_bias(bias_state, bias_ptr):
     """Load HMX bias/scale state from a VTCM memory operand."""
 
-    return tirx.call_intrin(
-        "void", tirx.op.Op.get("tl.hexagon_hmx_load_bias"), bias_state, bias_ptr
-    )
+    return tirx.call_intrin("void", tirx.op.Op.get("tl.hexagon_hmx_load_bias"), bias_state, bias_ptr)
 
 
 def hexagon_hmx_clear(acc_state):

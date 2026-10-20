@@ -19,6 +19,7 @@ from tilelang.tileop.gemm.registry import register_gemm_impl
 from tilelang.cpu.op.gemm.gemm_scalar import GEMM_INST_SCALAR, GemmScalar
 from tilelang.hexagon.gemm_hmx import GEMM_INST_HMX, GemmHMX
 
+
 def HexagonPassPipelineBody(mod, target):
     from tvm import tirx
 
@@ -28,7 +29,7 @@ def HexagonPassPipelineBody(mod, target):
         calls = []
         loops = []
 
-        def collect(node):
+        def collect(node, calls=calls, loops=loops):
             if isinstance(node, tirx.Call) and getattr(node.op, "name", "") == "tl.tileop.dma_copy":
                 calls.append(node)
             if isinstance(node, tirx.For):
@@ -37,8 +38,7 @@ def HexagonPassPipelineBody(mod, target):
         tirx.stmt_functor.post_order_visit(func.body, collect)
         if calls:
             for loop in loops:
-                if any(str(key) == "num_stages" or str(key).startswith(("software_pipeline", "tl_pipeline"))
-                       for key in loop.annotations):
+                if any(str(key) == "num_stages" or str(key).startswith(("software_pipeline", "tl_pipeline")) for key in loop.annotations):
                     raise ValueError("Hexagon T.dma_copy requires a manual schedule; T.Pipelined is unsupported")
                 if loop.kind in (tirx.ForKind.PARALLEL, tirx.ForKind.VECTORIZED):
                     # Ordinary T.Parallel compute loops are allowed; only reject
@@ -46,8 +46,11 @@ def HexagonPassPipelineBody(mod, target):
                     nested = []
                     tirx.stmt_functor.post_order_visit(
                         loop.body,
-                        lambda node: nested.append(node) if isinstance(node, tirx.Call)
-                        and getattr(node.op, "name", "") == "tl.tileop.dma_copy" else None,
+                        lambda node, nested=nested: (
+                            nested.append(node)
+                            if isinstance(node, tirx.Call) and getattr(node.op, "name", "") == "tl.tileop.dma_copy"
+                            else None
+                        ),
                     )
                     if nested:
                         raise ValueError("Hexagon T.dma_copy must be submitted from serial loops")
@@ -59,9 +62,5 @@ register_pipeline(PassPipeline("hexagon", HexagonPassPipelineBody))
 # The C++ hexagon GemmImpl (src/hexagon/op/gemm.cc) selects "hexagon.hmx" for fp16
 # 32-multiple gemms (-> GemmHMX: Crouton VTCM operands + HMX MAC), else "cpu.scalar"
 # (-> GemmScalar: a triple loop hexagon-clang auto-vectorizes onto HVX).
-register_gemm_impl(
-    "hexagon.scalar", GEMM_INST_SCALAR, lambda t: t.kind.name == "hexagon", GemmScalar
-)
-register_gemm_impl(
-    "hexagon.hmx", GEMM_INST_HMX, lambda t: t.kind.name == "hexagon", GemmHMX
-)
+register_gemm_impl("hexagon.scalar", GEMM_INST_SCALAR, lambda t: t.kind.name == "hexagon", GemmScalar)
+register_gemm_impl("hexagon.hmx", GEMM_INST_HMX, lambda t: t.kind.name == "hexagon", GemmHMX)

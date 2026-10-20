@@ -22,6 +22,7 @@ Requires a Hexagon device + SDK over adb (see README.md).
 
     python example_rmsnorm.py --m 64 --n 256
 """
+
 import argparse
 import torch
 import tilelang
@@ -36,14 +37,12 @@ EPS = 1e-5
 @macro
 def hexreduce(src, dst, rtype, dim):
     """Hexagon row reduction on shared VTCM tiles (max/sum over the last axis)."""
-    tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.reduce"),
-                     to_tile_region(src, "r"), to_tile_region(dst, "w"), rtype, dim, True)
+    tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.reduce"), to_tile_region(src, "r"), to_tile_region(dst, "w"), rtype, dim, True)
 
 
 def make_rmsnorm(M, N):
     @T.prim_func
-    def rmsnorm(X: T.Tensor((M, N), "float16"), G: T.Tensor((N,), "float16"),
-                O: T.Tensor((M, N), "float16")):
+    def rmsnorm(X: T.Tensor((M, N), "float16"), G: T.Tensor((N,), "float16"), O: T.Tensor((M, N), "float16")):
         with T.Kernel(1, threads=1) as _:
             X_sh = T.alloc_shared((M, N), "float16")
             Xsq = T.alloc_shared((M, N), "float16")
@@ -54,17 +53,16 @@ def make_rmsnorm(M, N):
             T.copy(X, X_sh)
             T.copy(G, G_sh)
             for i in T.serial(M):
-                for j in T.serial(N):                                  # X² (HVX map)
-                    Xsq[i, j] = T.cast(
-                        T.cast(X_sh[i, j], "float32") * T.cast(X_sh[i, j], "float32"), "float16")
-            hexreduce(Xsq, ssq, "sum", 1)                              # Σ_j X² (HVX reduce, fp32 accum)
-            for i in T.serial(M):                                      # per-row inverse-RMS (scalar)
+                for j in T.serial(N):  # X² (HVX map)
+                    Xsq[i, j] = T.cast(T.cast(X_sh[i, j], "float32") * T.cast(X_sh[i, j], "float32"), "float16")
+            hexreduce(Xsq, ssq, "sum", 1)  # Σ_j X² (HVX reduce, fp32 accum)
+            for i in T.serial(M):  # per-row inverse-RMS (scalar)
                 inv[i] = T.rsqrt(ssq[i] / T.float32(N) + T.float32(EPS))
             for i in T.serial(M):
-                for j in T.serial(N):                                  # O = X · inv · gamma (HVX map)
-                    O_sh[i, j] = T.cast(
-                        T.cast(X_sh[i, j], "float32") * inv[i] * T.cast(G_sh[j], "float32"), "float16")
+                for j in T.serial(N):  # O = X · inv · gamma (HVX map)
+                    O_sh[i, j] = T.cast(T.cast(X_sh[i, j], "float32") * inv[i] * T.cast(G_sh[j], "float32"), "float16")
             T.copy(O_sh, O)
+
     return rmsnorm
 
 
@@ -82,8 +80,7 @@ def main():
     ms = (x.float() ** 2).mean(dim=-1, keepdim=True)
     ref = x.float() / torch.sqrt(ms + EPS) * g.float()
     err = (o - ref).abs().max().item()
-    print(f"RMSNorm (M={M}, N={N}) on HVX: max abs err = {err:.4g}  "
-          f"({'PASS' if err < 0.05 else 'FAIL'})")
+    print(f"RMSNorm (M={M}, N={N}) on HVX: max abs err = {err:.4g}  ({'PASS' if err < 0.05 else 'FAIL'})")
 
 
 if __name__ == "__main__":

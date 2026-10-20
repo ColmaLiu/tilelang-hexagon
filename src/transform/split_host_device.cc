@@ -475,9 +475,9 @@ tirx::PrimFunc SplitHostDevice(tirx::PrimFunc func, IRModule *device_mod,
     splitter.SetClusterDims(opt.value());
     func = tvm::WithoutAttr(std::move(func), "cluster_dims");
   }
-  // Propagate the Hexagon worker-pool hint (number of HW threads to fan the grid
-  // across) from the host func to the device kernel so the codegen can emit the
-  // tl_parallel dispatch instead of a serial block loop.
+  // Propagate the Hexagon worker-pool hint (number of HW threads to fan the
+  // grid across) from the host func to the device kernel so the codegen can
+  // emit the tl_parallel dispatch instead of a serial block loop.
   if (auto opt = func->GetAttr<Integer>("hexagon.dma_queue_capacity")) {
     splitter.SetDmaCapacity(opt.value());
     func = tvm::WithoutAttr(std::move(func), "hexagon.dma_queue_capacity");

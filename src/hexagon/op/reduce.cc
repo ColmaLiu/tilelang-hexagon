@@ -8,10 +8,10 @@
  * map half is the elementwise HVX vectorizer in the codegen.
  *
  * Only the shapes softmax/layernorm need are handled (2D src, reduce dim=1,
- * clear=True, fp16/fp32 src, fp32 dst); anything else errors clearly rather than
- * silently falling back to a GPU-shaped lowering Hexagon can't run.  The runtime
- * helper uses HVX for aligned row spans and scalar tails/fallbacks otherwise, so
- * arbitrary positive row widths stay correct.
+ * clear=True, fp16/fp32 src, fp32 dst); anything else errors clearly rather
+ * than silently falling back to a GPU-shaped lowering Hexagon can't run.  The
+ * runtime helper uses HVX for aligned row spans and scalar tails/fallbacks
+ * otherwise, so arbitrary positive row widths stay correct.
  */
 
 #include "op/reduce.h"
@@ -46,18 +46,20 @@ struct Reduce {
            "value in scalar code (e.g. m = max(m, rowmax(S))).";
     const bool fp32_source = op.src->dtype == DataType::Float(32);
     ICHECK(op.src->dtype == DataType::Float(16) || fp32_source)
-        << "Hexagon reduce supports fp16/fp32 source only; got " << op.src->dtype;
+        << "Hexagon reduce supports fp16/fp32 source only; got "
+        << op.src->dtype;
     ICHECK(op.dst->dtype == DataType::Float(32))
         << "Hexagon reduce writes an fp32 result; declare the destination "
            "float32 (got "
         << op.dst->dtype << ").";
-    ICHECK(!op.nan_propagate)
-        << "Hexagon reduce does not implement nan_propagate (HVX vmax has fixed "
-           "NaN handling); use the default.";
+    ICHECK(!op.nan_propagate) << "Hexagon reduce does not implement "
+                                 "nan_propagate (HVX vmax has fixed "
+                                 "NaN handling); use the default.";
     // The HVX primitive walks contiguous full-width rows (in + i*cols), and
-    // MakeAccessPtrFromRegion drops a 2D sub-region offset — so the source region
-    // must span the whole buffer.  A sub-tile / column-slice / row-offset reduce
-    // would silently read the wrong rows; reject it loudly instead.
+    // MakeAccessPtrFromRegion drops a 2D sub-region offset — so the source
+    // region must span the whole buffer.  A sub-tile / column-slice /
+    // row-offset reduce would silently read the wrong rows; reject it loudly
+    // instead.
     for (int d = 0; d < ndim; ++d) {
       PrimExpr zero = IntImm(op.srcRegion_->region[d]->min.dtype(), 0);
       ICHECK(analyzer->CanProveEqual(op.srcRegion_->region[d]->min, zero) &&
@@ -66,7 +68,8 @@ struct Reduce {
              "region; a sub-region reduce is unsupported.";
     }
     if (const auto *cols = src_extents[1].as<IntImmNode>()) {
-      ICHECK_GT(cols->value, 0) << "Hexagon reduce requires a positive row width.";
+      ICHECK_GT(cols->value, 0)
+          << "Hexagon reduce requires a positive row width.";
     }
 
     const char *fn = nullptr;
