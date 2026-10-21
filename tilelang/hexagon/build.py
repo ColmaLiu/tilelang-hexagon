@@ -80,6 +80,12 @@ def build_cmake_fastrpc(
     """
     sdk = (sdk or HexagonSDK()).validate()
     dsp_arch = dsp_arch or sdk.dsp_arch
+    hlos = os.environ.get("TILELANG_HEXAGON_HLOS", "android")
+    if hlos not in {"android", "linux"}:
+        raise HexagonBuildError(f"Unsupported HLOS: {hlos}")
+    if hlos == "linux":
+        from .linux_runtime import build_linux_fastrpc
+        return build_linux_fastrpc(project_dir, name, sdk, dsp_arch, build_host, verbose)
     env = sdk.environ
     build_cmake = sdk.build_cmake
 

@@ -56,7 +56,7 @@ class HexagonKernelAdapter(BaseKernelAdapter):
         kernel_name: str | None = None,
         connection: HexagonConnection | None = None,
         sdk: HexagonSDK | None = None,
-        dsp_arch: str = "v79",  # SM8750/Hexagon v79 hardware (see env.py)
+        dsp_arch: str | None = None,
         verbose: bool = False,
         workdir: str | None = None,
         use_agent: bool = True,
@@ -65,8 +65,8 @@ class HexagonKernelAdapter(BaseKernelAdapter):
         self.kernel_name = kernel_name or _kernel_name(kernel_source)
         self.target = target
         self.verbose = verbose
-        self.dsp_arch = dsp_arch
-        self.sdk = (sdk or HexagonSDK(dsp_arch=dsp_arch)).validate()
+        self.sdk = (sdk or (HexagonSDK(dsp_arch=dsp_arch) if dsp_arch else HexagonSDK())).validate()
+        self.dsp_arch = dsp_arch or self.sdk.dsp_arch
         self._param_list = list(params)
         # Legalize negative output indices (e.g. out_idx=-1) up front: _deploy()
         # consumes self._result_idx before BaseKernelAdapter.__init__ runs, so we
@@ -85,6 +85,10 @@ class HexagonKernelAdapter(BaseKernelAdapter):
     # ---- build + deploy ---------------------------------------------------
     def _connection(self) -> HexagonConnection:
         if self._conn is None:
+            if os.environ.get("TILELANG_HEXAGON_HLOS") == "linux":
+                from .linux_runtime import LinuxConnection
+                self._conn = LinuxConnection.from_environment()
+                return self._conn
             serials = AdbConnection.list_devices()
             if not serials:
                 raise RuntimeError("no authorized adb device found (check `adb devices`)")

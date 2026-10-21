@@ -1,0 +1,12 @@
+.git
+**/.git
+**/._*
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+build
+dist
+output
+docker/hexagon/local
+*.tar
+*.tar.gz
