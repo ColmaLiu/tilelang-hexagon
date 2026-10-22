@@ -40,18 +40,18 @@ TL_DEVICE HVX_Vector tl_q8_0_accum_k32(const uint8_t *weight,
   for (int group = 0; group < 8; ++group) {
     HVX_Vector raw_w = tl_hvx_loadu(weight + group * 128);
     HVX_Vector rotated_w = Q6_V_vror_VR(raw_w, 64);
-    HVX_Vector packed_w =
-        Q6_V_lo_W(Q6_W_vshuff_VVR(rotated_w, raw_w, -2));
+    HVX_Vector packed_w = Q6_V_lo_W(Q6_W_vshuff_VVR(rotated_w, raw_w, -2));
     HVX_Vector replicated_x = tl_hvx_loadu(activation + group * 128);
     sum = Q6_Vw_vrmpyacc_VwVbVb(sum, packed_w, replicated_x);
   }
   return sum;
 }
 
-TL_DEVICE int tl_hexagon_q8_0_dot_32x1_impl(
-    int k, float *__restrict__ dst, const uint8_t *__restrict__ weight,
-    const uint8_t *__restrict__ activation, int valid_rows,
-    const float *__restrict__ bias) {
+TL_DEVICE int
+tl_hexagon_q8_0_dot_32x1_impl(int k, float *__restrict__ dst,
+                              const uint8_t *__restrict__ weight,
+                              const uint8_t *__restrict__ activation,
+                              int valid_rows, const float *__restrict__ bias) {
   if (k <= 0 || (k % TL_Q8_0_BLOCK_K) != 0 || valid_rows < 0 ||
       valid_rows > TL_Q8_0_BLOCK_N || dst == nullptr || weight == nullptr ||
       activation == nullptr) {
@@ -68,9 +68,9 @@ TL_DEVICE int tl_hexagon_q8_0_dot_32x1_impl(
     const uint8_t *x = activation + (size_t)kt * TL_Q8_0_STAGED_TILE_BYTES;
     HVX_Vector dot_i32 = tl_q8_0_accum_k32(w, x);
     HVX_Vector dot_f32 = Q6_Vsf_equals_Vw(dot_i32);
-    HVX_Vector scale = tl_q8_0_mul_scale_lower32(
-        tl_hvx_loadu(w + TL_Q8_0_SCALE_OFFSET),
-        tl_hvx_loadu(x + TL_Q8_0_SCALE_OFFSET));
+    HVX_Vector scale =
+        tl_q8_0_mul_scale_lower32(tl_hvx_loadu(w + TL_Q8_0_SCALE_OFFSET),
+                                  tl_hvx_loadu(x + TL_Q8_0_SCALE_OFFSET));
     accum = tl_hvx_add_sf(accum, tl_hvx_mul_sf(dot_f32, scale));
   }
 
@@ -98,17 +98,18 @@ TL_DEVICE int tl_hexagon_q8_0_dot_32x1_impl(
   return 0;
 }
 
-TL_DEVICE int tl_hexagon_q8_0_dot_32x1(
-    int k, float *__restrict__ dst, const uint8_t *__restrict__ weight,
-    const uint8_t *__restrict__ activation, int valid_rows,
-    const float *__restrict__ bias) {
+TL_DEVICE int tl_hexagon_q8_0_dot_32x1(int k, float *__restrict__ dst,
+                                       const uint8_t *__restrict__ weight,
+                                       const uint8_t *__restrict__ activation,
+                                       int valid_rows,
+                                       const float *__restrict__ bias) {
   return tl_hexagon_q8_0_dot_32x1_impl(k, dst, weight, activation, valid_rows,
-                                      bias);
+                                       bias);
 }
 
 TL_DEVICE int tl_hexagon_q8_0_dot_32x1_nobias(
     int k, float *__restrict__ dst, const uint8_t *__restrict__ weight,
     const uint8_t *__restrict__ activation, int valid_rows) {
   return tl_hexagon_q8_0_dot_32x1_impl(k, dst, weight, activation, valid_rows,
-                                      nullptr);
+                                       nullptr);
 }

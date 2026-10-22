@@ -29,6 +29,7 @@ Requires a Hexagon device + SDK over adb (see README.md).
 
     python example_flash_attention.py --seq 256
 """
+
 import argparse
 import torch
 import tilelang
@@ -44,14 +45,14 @@ NEG = -3.0e38
 def hexreduce(src, dst, rtype, dim):
     """Hexagon row reduction: invoke the reduce tile op directly on shared VTCM
     tiles (max/sum over the last axis), bypassing the fragment-based macro."""
-    tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.reduce"),
-                     to_tile_region(src, "r"), to_tile_region(dst, "w"), rtype, dim, True)
+    tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.reduce"), to_tile_region(src, "r"), to_tile_region(dst, "w"), rtype, dim, True)
 
 
 def make_flash(M, SEQ, BN, D):
     @T.prim_func
-    def flash(Q: T.Tensor((M, D), "float16"), K: T.Tensor((SEQ, D), "float16"),
-              V: T.Tensor((SEQ, D), "float16"), O: T.Tensor((M, D), "float16")):
+    def flash(
+        Q: T.Tensor((M, D), "float16"), K: T.Tensor((SEQ, D), "float16"), V: T.Tensor((SEQ, D), "float16"), O: T.Tensor((M, D), "float16")
+    ):
         with T.Kernel(1, threads=1) as _:
             Q_row = T.alloc_shared((M, D), "float16")
             K_row = T.alloc_shared((BN, D), "float16")
@@ -64,16 +65,16 @@ def make_flash(M, SEQ, BN, D):
             temp_hmx = T.alloc_shared((M, D), "float16")
             temp = T.alloc_shared((M, D), "float16")
             acc_o = T.alloc_shared((M, D), "float16")
-            m = T.alloc_shared((M,), "float32")       # running max
-            l = T.alloc_shared((M,), "float32")       # running denominator
-            rmax = T.alloc_shared((M,), "float32")    # reduce dst (also the new max)
-            rsum = T.alloc_shared((M,), "float32")    # reduce dst
+            m = T.alloc_shared((M,), "float32")  # running max
+            l = T.alloc_shared((M,), "float32")  # running denominator
+            rmax = T.alloc_shared((M,), "float32")  # reduce dst (also the new max)
+            rsum = T.alloc_shared((M,), "float32")  # reduce dst
             scale = T.alloc_shared((M,), "float32")
             T.copy(Q, Q_row)
             T.copy(Q_row, Q_sh)
             for i in T.serial(M):
                 for j in T.serial(D):
-                    acc_o[i, j] = T.float16(0)                                  # map (HVX)
+                    acc_o[i, j] = T.float16(0)  # map (HVX)
             for i in T.serial(M):
                 m[i] = T.float32(NEG)
                 l[i] = T.float32(0)
@@ -82,33 +83,33 @@ def make_flash(M, SEQ, BN, D):
                 T.copy(V[kv * BN, 0], V_row)
                 T.copy(K_row, K_sh)
                 T.copy(V_row, V_sh)
-                T.gemm(Q_sh, K_sh, S_hmx, transpose_B=True, clear_accum=True)   # S = Q@Kᵀ (HMX)
-                T.copy(S_hmx, S)                                                # Crouton -> row-major
-                hexreduce(S, rmax, "max", 1)                                    # rmax = rowmax(S) (HVX)
-                for i in T.serial(M):                                           # running max + rescale (scalar, M)
+                T.gemm(Q_sh, K_sh, S_hmx, transpose_B=True, clear_accum=True)  # S = Q@Kᵀ (HMX)
+                T.copy(S_hmx, S)  # Crouton -> row-major
+                hexreduce(S, rmax, "max", 1)  # rmax = rowmax(S) (HVX)
+                for i in T.serial(M):  # running max + rescale (scalar, M)
                     rmax[i] = T.max(m[i], rmax[i])
                     scale[i] = T.exp(m[i] - rmax[i])
                 for i in T.serial(M):
-                    for j in T.serial(BN):                                      # P = exp(S − m) (HVX map)
+                    for j in T.serial(BN):  # P = exp(S − m) (HVX map)
                         S[i, j] = T.cast(T.exp(T.cast(S[i, j], "float32") - rmax[i]), "float16")
-                hexreduce(S, rsum, "sum", 1)                                    # rsum = rowsum(P) (HVX)
-                for i in T.serial(M):                                           # denominator update (scalar, M)
+                hexreduce(S, rsum, "sum", 1)  # rsum = rowsum(P) (HVX)
+                for i in T.serial(M):  # denominator update (scalar, M)
                     l[i] = l[i] * scale[i] + rsum[i]
                     m[i] = rmax[i]
                 for i in T.serial(M):
-                    for j in T.serial(D):                                       # rescale acc_o (HVX map)
+                    for j in T.serial(D):  # rescale acc_o (HVX map)
                         acc_o[i, j] = T.cast(T.cast(acc_o[i, j], "float32") * scale[i], "float16")
-                T.copy(S, S_hmx)                                                # row-major -> Crouton
-                T.gemm(S_hmx, V_sh, temp_hmx, clear_accum=True)                 # temp = P@V (HMX)
-                T.copy(temp_hmx, temp)                                          # Crouton -> row-major
+                T.copy(S, S_hmx)  # row-major -> Crouton
+                T.gemm(S_hmx, V_sh, temp_hmx, clear_accum=True)  # temp = P@V (HMX)
+                T.copy(temp_hmx, temp)  # Crouton -> row-major
                 for i in T.serial(M):
-                    for j in T.serial(D):                                       # acc_o += temp (HVX map)
-                        acc_o[i, j] = T.cast(
-                            T.cast(acc_o[i, j], "float32") + T.cast(temp[i, j], "float32"), "float16")
+                    for j in T.serial(D):  # acc_o += temp (HVX map)
+                        acc_o[i, j] = T.cast(T.cast(acc_o[i, j], "float32") + T.cast(temp[i, j], "float32"), "float16")
             for i in T.serial(M):
-                for j in T.serial(D):                                           # O = acc_o / l (HVX map)
+                for j in T.serial(D):  # O = acc_o / l (HVX map)
                     acc_o[i, j] = T.cast(T.cast(acc_o[i, j], "float32") / l[i], "float16")
             T.copy(acc_o, O)
+
     return flash
 
 
@@ -128,8 +129,7 @@ def main():
     o = kernel(q, k, v).float()
     ref = torch.softmax(q.float() @ k.float().T, dim=-1) @ v.float()
     err = (o - ref).abs().max().item()
-    print(f"flash attention (M={M}, SEQ={SEQ}, BN={BN}, D={D}) on HMX+HVX: max abs err = {err:.4g}  "
-          f"({'PASS' if err < 0.05 else 'FAIL'})")
+    print(f"flash attention (M={M}, SEQ={SEQ}, BN={BN}, D={D}) on HMX+HVX: max abs err = {err:.4g}  ({'PASS' if err < 0.05 else 'FAIL'})")
 
 
 if __name__ == "__main__":

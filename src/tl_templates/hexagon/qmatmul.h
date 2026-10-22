@@ -18,9 +18,10 @@
 
 // Convert two contiguous 32-float activation rows into one 64-half HMX
 // activation vector: row0[k0], row1[k0], row0[k1], row1[k1], ... .
-TL_DEVICE int tl_hexagon_hmx_pack_a_f32_pair_k32(
-    __fp16 *__restrict__ dst, const float *__restrict__ row0,
-    const float *__restrict__ row1) {
+TL_DEVICE int
+tl_hexagon_hmx_pack_a_f32_pair_k32(__fp16 *__restrict__ dst,
+                                   const float *__restrict__ row0,
+                                   const float *__restrict__ row1) {
   HVX_Vector v0 = tl_hvx_loadu(row0);
   HVX_Vector v1 = tl_hvx_loadu(row1);
 #if __HVX_ARCH__ >= 81
@@ -38,9 +39,10 @@ TL_DEVICE int tl_hexagon_hmx_pack_a_f32_pair_k32(
 // Convert one 128-byte HMX output-Crouton row-pair vector into two contiguous
 // 32-float output rows. Q6_Wqf32_vmpy_VhfVhf performs the FP16-to-qfloat32
 // expansion while preserving the two rows in the low/high vector halves.
-TL_DEVICE int tl_hexagon_hmx_unpack_c_f32_pair_n32(
-    float *__restrict__ row0, float *__restrict__ row1,
-    const __fp16 *__restrict__ src) {
+TL_DEVICE int
+tl_hexagon_hmx_unpack_c_f32_pair_n32(float *__restrict__ row0,
+                                     float *__restrict__ row1,
+                                     const __fp16 *__restrict__ src) {
   const HVX_Vector packed = tl_hvx_loadu(src);
   const HVX_Vector one = Q6_Vh_vsplat_R(0x3c00);
   const HVX_VectorPair rows = Q6_Wqf32_vmpy_VhfVhf(packed, one);
@@ -50,7 +52,7 @@ TL_DEVICE int tl_hexagon_hmx_unpack_c_f32_pair_n32(
 }
 
 TL_DEVICE HVX_Vector tl_q4_0_scale_i16_to_f16(HVX_Vector values,
-                                               HVX_Vector scale) {
+                                              HVX_Vector scale) {
   HVX_Vector fp16 = Q6_Vhf_equals_Vh(values);
   return Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(fp16, scale));
 }
@@ -85,8 +87,9 @@ tl_q4_0_load_scale_tail(const uint8_t *__restrict__ scales) {
 
 // Duplicate each FP16 scale for the low/high nibble pair consumed by a
 // weight-Crouton vector.
-TL_DEVICE int tl_hexagon_q4_0_prepare_scale_32(
-    __fp16 *__restrict__ dst, const uint8_t *__restrict__ scales) {
+TL_DEVICE int
+tl_hexagon_q4_0_prepare_scale_32(__fp16 *__restrict__ dst,
+                                 const uint8_t *__restrict__ scales) {
   const HVX_Vector raw_scale = tl_q4_0_load_scale_tail(scales);
   const HVX_Vector duplicated_scale =
       Q6_V_lo_W(Q6_W_vshuff_VVR(raw_scale, raw_scale, -2));
@@ -97,16 +100,16 @@ TL_DEVICE int tl_hexagon_q4_0_prepare_scale_32(
 // Expand one 128-byte packed-Q4 register into four consecutive 128-byte FP16
 // vectors in HMX weight-Crouton order. `duplicated_scale` is the safe 128-byte
 // vector produced once per tile by tl_hexagon_q4_0_prepare_scale_32.
-TL_DEVICE int tl_hexagon_q4_0_dequant_group_128(
-    __fp16 *__restrict__ dst, const uint8_t *__restrict__ quant,
-    const __fp16 *__restrict__ duplicated_scale) {
+TL_DEVICE int
+tl_hexagon_q4_0_dequant_group_128(__fp16 *__restrict__ dst,
+                                  const uint8_t *__restrict__ quant,
+                                  const __fp16 *__restrict__ duplicated_scale) {
   const HVX_Vector packed = tl_hvx_loadu(quant);
   const HVX_Vector mask = Q6_Vb_vsplat_R(0x0f);
   const HVX_Vector zero_point = Q6_Vb_vsplat_R(8);
 
   HVX_Vector low = Q6_Vb_vsub_VbVb(Q6_V_vand_VV(packed, mask), zero_point);
-  HVX_Vector high =
-      Q6_Vb_vsub_VbVb(Q6_Vub_vlsr_VubR(packed, 4), zero_point);
+  HVX_Vector high = Q6_Vb_vsub_VbVb(Q6_Vub_vlsr_VubR(packed, 4), zero_point);
   HVX_VectorPair interleaved = Q6_W_vshuff_VVR(high, low, -1);
   HVX_VectorPair values01 = Q6_Wh_vunpack_Vb(Q6_V_lo_W(interleaved));
   HVX_VectorPair values23 = Q6_Wh_vunpack_Vb(Q6_V_hi_W(interleaved));
@@ -114,17 +117,13 @@ TL_DEVICE int tl_hexagon_q4_0_dequant_group_128(
   const HVX_Vector scale = tl_hvx_loadu(duplicated_scale);
 
   tl_hvx_storeu(dst + 0 * 64,
-                tl_q4_0_scale_i16_to_f16(Q6_V_lo_W(values01),
-                                          scale));
+                tl_q4_0_scale_i16_to_f16(Q6_V_lo_W(values01), scale));
   tl_hvx_storeu(dst + 1 * 64,
-                tl_q4_0_scale_i16_to_f16(Q6_V_hi_W(values01),
-                                          scale));
+                tl_q4_0_scale_i16_to_f16(Q6_V_hi_W(values01), scale));
   tl_hvx_storeu(dst + 2 * 64,
-                tl_q4_0_scale_i16_to_f16(Q6_V_lo_W(values23),
-                                          scale));
+                tl_q4_0_scale_i16_to_f16(Q6_V_lo_W(values23), scale));
   tl_hvx_storeu(dst + 3 * 64,
-                tl_q4_0_scale_i16_to_f16(Q6_V_hi_W(values23),
-                                          scale));
+                tl_q4_0_scale_i16_to_f16(Q6_V_hi_W(values23), scale));
   return 0;
 }
 
@@ -133,36 +132,28 @@ TL_DEVICE int tl_hexagon_q4_0_dequant_group_128(
 // packed HVX vectors are independent, so keeping all of them live lets clang
 // overlap their extract/shuffle/unpack/multiply chains instead of serializing
 // four calls to the single-register atom above.
-TL_DEVICE int tl_hexagon_q4_0_dequant_tile_32x32(
-    __fp16 *__restrict__ dst, const uint8_t *__restrict__ tile) {
+TL_DEVICE int
+tl_hexagon_q4_0_dequant_tile_32x32(__fp16 *__restrict__ dst,
+                                   const uint8_t *__restrict__ tile) {
   const HVX_Vector mask = Q6_Vb_vsplat_R(0x0f);
   const HVX_Vector zero_point = Q6_Vb_vsplat_R(8);
   const HVX_Vector raw_scale =
       tl_q4_0_load_scale_tail(tile + TL_Q4_0_QUANT_BYTES);
-  const HVX_Vector scale =
-      Q6_V_lo_W(Q6_W_vshuff_VVR(raw_scale, raw_scale, -2));
+  const HVX_Vector scale = Q6_V_lo_W(Q6_W_vshuff_VVR(raw_scale, raw_scale, -2));
 
   const HVX_Vector q0 = tl_hvx_loadu(tile + 0 * TL_Q4_0_GROUP_BYTES);
   const HVX_Vector q1 = tl_hvx_loadu(tile + 1 * TL_Q4_0_GROUP_BYTES);
   const HVX_Vector q2 = tl_hvx_loadu(tile + 2 * TL_Q4_0_GROUP_BYTES);
   const HVX_Vector q3 = tl_hvx_loadu(tile + 3 * TL_Q4_0_GROUP_BYTES);
 
-  const HVX_Vector lo0 =
-      Q6_Vb_vsub_VbVb(Q6_V_vand_VV(q0, mask), zero_point);
-  const HVX_Vector lo1 =
-      Q6_Vb_vsub_VbVb(Q6_V_vand_VV(q1, mask), zero_point);
-  const HVX_Vector lo2 =
-      Q6_Vb_vsub_VbVb(Q6_V_vand_VV(q2, mask), zero_point);
-  const HVX_Vector lo3 =
-      Q6_Vb_vsub_VbVb(Q6_V_vand_VV(q3, mask), zero_point);
-  const HVX_Vector hi0 =
-      Q6_Vb_vsub_VbVb(Q6_Vub_vlsr_VubR(q0, 4), zero_point);
-  const HVX_Vector hi1 =
-      Q6_Vb_vsub_VbVb(Q6_Vub_vlsr_VubR(q1, 4), zero_point);
-  const HVX_Vector hi2 =
-      Q6_Vb_vsub_VbVb(Q6_Vub_vlsr_VubR(q2, 4), zero_point);
-  const HVX_Vector hi3 =
-      Q6_Vb_vsub_VbVb(Q6_Vub_vlsr_VubR(q3, 4), zero_point);
+  const HVX_Vector lo0 = Q6_Vb_vsub_VbVb(Q6_V_vand_VV(q0, mask), zero_point);
+  const HVX_Vector lo1 = Q6_Vb_vsub_VbVb(Q6_V_vand_VV(q1, mask), zero_point);
+  const HVX_Vector lo2 = Q6_Vb_vsub_VbVb(Q6_V_vand_VV(q2, mask), zero_point);
+  const HVX_Vector lo3 = Q6_Vb_vsub_VbVb(Q6_V_vand_VV(q3, mask), zero_point);
+  const HVX_Vector hi0 = Q6_Vb_vsub_VbVb(Q6_Vub_vlsr_VubR(q0, 4), zero_point);
+  const HVX_Vector hi1 = Q6_Vb_vsub_VbVb(Q6_Vub_vlsr_VubR(q1, 4), zero_point);
+  const HVX_Vector hi2 = Q6_Vb_vsub_VbVb(Q6_Vub_vlsr_VubR(q2, 4), zero_point);
+  const HVX_Vector hi3 = Q6_Vb_vsub_VbVb(Q6_Vub_vlsr_VubR(q3, 4), zero_point);
 
   const HVX_VectorPair shuf0 = Q6_W_vshuff_VVR(hi0, lo0, -1);
   const HVX_VectorPair shuf1 = Q6_W_vshuff_VVR(hi1, lo1, -1);
@@ -179,9 +170,9 @@ TL_DEVICE int tl_hexagon_q4_0_dequant_tile_32x32(
   const HVX_VectorPair v31 = Q6_Wh_vunpack_Vb(Q6_V_hi_W(shuf3));
 
 #define TL_Q4_0_STORE_PAIR(pair, index)                                        \
-  tl_hvx_storeu(dst + ((index) + 0) * 64,                                     \
+  tl_hvx_storeu(dst + ((index) + 0) * 64,                                      \
                 tl_q4_0_scale_i16_to_f16(Q6_V_lo_W(pair), scale));             \
-  tl_hvx_storeu(dst + ((index) + 1) * 64,                                     \
+  tl_hvx_storeu(dst + ((index) + 1) * 64,                                      \
                 tl_q4_0_scale_i16_to_f16(Q6_V_hi_W(pair), scale))
 
   TL_Q4_0_STORE_PAIR(v00, 0);

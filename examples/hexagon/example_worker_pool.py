@@ -17,6 +17,7 @@ Requires a Hexagon device + SDK over adb (see README.md).
 
     python example_worker_pool.py
 """
+
 import time
 import torch
 import tilelang
@@ -28,8 +29,7 @@ NW = 6  # workers (== the device's HW-thread count)
 # ----- demo 1: batched matmul, each block a T.gemm parallelized across workers -----
 def make_batched_matmul(NB, M, N, K, num_workers):
     @T.prim_func
-    def batched(A: T.Tensor((NB, M, K), "float16"), B: T.Tensor((NB, K, N), "float16"),
-                C: T.Tensor((NB, M, N), "float16")):
+    def batched(A: T.Tensor((NB, M, K), "float16"), B: T.Tensor((NB, K, N), "float16"), C: T.Tensor((NB, M, N), "float16")):
         with T.Kernel(NB, threads=1, num_workers=num_workers) as bx:
             A_hmx = T.alloc_shared((M, K), "float16")  # per-worker Crouton tiles
             B_hmx = T.alloc_shared((K, N), "float16")
@@ -38,6 +38,7 @@ def make_batched_matmul(NB, M, N, K, num_workers):
             T.copy(B[bx, :, :], B_hmx)
             T.gemm(A_hmx, B_hmx, C_hmx, clear_accum=True)
             T.copy(C_hmx, C[bx, :, :])
+
     return batched
 
 
@@ -52,6 +53,7 @@ def make_heavy(NB, BS, ITERS, num_workers):
                 for _ in T.serial(ITERS):
                     acc[0] = acc[0] * T.float16(0.999)
                 C[bx * BS + i] = acc[0]
+
     return heavy
 
 
@@ -62,8 +64,7 @@ def demo_batched_matmul():
     b = (torch.randn(NB, K, N) * 0.25).half()
     c = kernel(a, b).float()
     err = (c - torch.bmm(a.float(), b.float())).abs().max().item()
-    print(f"[1] batched matmul ({NB}x {M}x{N}x{K}) across {NW} workers: "
-          f"max abs err = {err:.4g}  ({'PASS' if err < 0.05 else 'FAIL'})")
+    print(f"[1] batched matmul ({NB}x {M}x{N}x{K}) across {NW} workers: max abs err = {err:.4g}  ({'PASS' if err < 0.05 else 'FAIL'})")
 
 
 def demo_speedup():
@@ -80,8 +81,7 @@ def demo_speedup():
             ts.append(time.time() - t0)
         times[nw] = min(ts)
     sp = times[1] / times[NW]
-    print(f"[2] compute-heavy HVX grid: num_workers=1 {times[1]*1e3:.0f} ms  "
-          f"num_workers={NW} {times[NW]*1e3:.0f} ms  ->  {sp:.2f}x")
+    print(f"[2] compute-heavy HVX grid: num_workers=1 {times[1] * 1e3:.0f} ms  num_workers={NW} {times[NW] * 1e3:.0f} ms  ->  {sp:.2f}x")
 
 
 if __name__ == "__main__":

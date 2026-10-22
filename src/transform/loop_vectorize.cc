@@ -185,8 +185,8 @@ public:
       vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
           1024;
     } else if (TargetSupportVectorize256(Target::Current(false)) &&
-        !disable_vectorize_256 &&
-        VectorizeFindMemoryAccess::MaySupportVectorize256(node)) {
+               !disable_vectorize_256 &&
+               VectorizeFindMemoryAccess::MaySupportVectorize256(node)) {
       vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
           256;
     } else {
@@ -362,16 +362,17 @@ public:
     // GCD with loop extent to ensure vector_size divides the loop extent
     vector_size_ = arith::ZeroAwareGCD(loop_extent_vector_size_, vector_size_);
 
-    // Hexagon: HVX has no sub-register vector ops — every instruction works on a
-    // full 128-byte register.  The GCD above minimizes across dtypes, so a loop
-    // mixing a wide and a NARROW dtype (e.g. fp16 output + uint8 input) picks the
-    // wide dtype's 1-register width (fp16 -> 64 lanes), at which the narrow dtype
-    // is sub-register (uint8 at 64 lanes = 64B = half a register).  The codegen
-    // then emits e.g. `uint8_t64 & ...`, which clang lowers to a full-register op
-    // that over-reads and faults on device.  Enforce that the NARROWEST dtype
-    // fills whole registers: vector_size must be a multiple of (1024/min_bits).
-    // Bump to that width (wider dtypes just use a VectorPair) if the loop extent
-    // and every buffer access still vectorize there; otherwise scalarize (safe).
+    // Hexagon: HVX has no sub-register vector ops — every instruction works on
+    // a full 128-byte register.  The GCD above minimizes across dtypes, so a
+    // loop mixing a wide and a NARROW dtype (e.g. fp16 output + uint8 input)
+    // picks the wide dtype's 1-register width (fp16 -> 64 lanes), at which the
+    // narrow dtype is sub-register (uint8 at 64 lanes = 64B = half a register).
+    // The codegen then emits e.g. `uint8_t64 & ...`, which clang lowers to a
+    // full-register op that over-reads and faults on device.  Enforce that the
+    // NARROWEST dtype fills whole registers: vector_size must be a multiple of
+    // (1024/min_bits). Bump to that width (wider dtypes just use a VectorPair)
+    // if the loop extent and every buffer access still vectorize there;
+    // otherwise scalarize (safe).
     if (vector_size_ > 1 && inner_for_ &&
         TargetIsHexagon(Target::Current(false))) {
       int min_bits = 0;
@@ -389,7 +390,8 @@ public:
         for (const auto &info : buffer_vector_infos_) {
           if (!ok || !info.buffer.defined())
             continue;
-          if (info.indices.empty()) { // can't re-validate this access -> be safe
+          if (info.indices
+                  .empty()) { // can't re-validate this access -> be safe
             ok = false;
             break;
           }

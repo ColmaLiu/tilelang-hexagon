@@ -329,12 +329,8 @@ def test_hmx_emitter_native_interface_contract():
 
 def test_hmx_atom_uses_standard_tile_coordinates():
     source = _lower_source(_make_hmx_coordinate_probe())
-    mma_call = next(
-        line for line in source.splitlines() if "tl_hexagon_hmx_mma_atom" in line
-    )
-    store_call = next(
-        line for line in source.splitlines() if "tl_hexagon_hmx_store_cvt_state" in line
-    )
+    mma_call = next(line for line in source.splitlines() if "tl_hexagon_hmx_mma_atom" in line)
+    store_call = next(line for line in source.splitlines() if "tl_hexagon_hmx_store_cvt_state" in line)
     assert "A_hmx[3072]" in mma_call
     assert "B_hmx[3072]" in mma_call
     assert "C_hmx[3072]" in store_call
@@ -382,9 +378,7 @@ def test_hmx_operand_alignment_is_propagated_per_role():
         "dd_activation",
         "ee_output",
     ):
-        match = re.search(
-            rf"void\* {name} = .*buf_dyn_shmem \+ (\d+)\)\);", source
-        )
+        match = re.search(rf"void\* {name} = .*buf_dyn_shmem \+ (\d+)\)\);", source)
         assert match is not None
         offsets[name] = int(match.group(1))
 
@@ -418,9 +412,7 @@ def test_t_gemm_lowers_to_native_hmx_layout_and_atoms():
 
     offsets = {}
     for name in ("A_hmx", "B_hmx", "C_hmx"):
-        match = re.search(
-            rf"void\* {name} = .*buf_dyn_shmem \+ (\d+)\)\);", source
-        )
+        match = re.search(rf"void\* {name} = .*buf_dyn_shmem \+ (\d+)\)\);", source)
         assert match is not None
         offsets[name] = int(match.group(1))
         assert offsets[name] % 2048 == 0
@@ -477,10 +469,7 @@ def test_hmx_copy_matches_singleton_tile_axes_and_dequant_staging():
     assert "tl_hexagon_hmx_unpack_crouton((&(C[0])), (&(((half*)C_hmx)[0])), 32, 128, 128, 1, 0)" in source
     assert "A_row" not in source
     assert "C_row" not in source
-    assert not any(
-        "B_hmx)[" in line and "=" in line
-        for line in source.splitlines()
-    )
+    assert not any("B_hmx)[" in line and "=" in line for line in source.splitlines())
 
 
 def test_hmx_copy_fuses_global_matrix_slices_with_one_logical_copy():
@@ -537,9 +526,7 @@ def test_hmx_atom_q4_codegen():
 
     offsets = {}
     for name in ("A_hmx", "B_hmx", "C_hmx"):
-        match = re.search(
-            rf"void\* {name} = .*buf_dyn_shmem \+ (\d+)\)\);", source
-        )
+        match = re.search(rf"void\* {name} = .*buf_dyn_shmem \+ (\d+)\)\);", source)
         assert match is not None
         offsets[name] = int(match.group(1))
         assert offsets[name] % 2048 == 0
@@ -556,9 +543,7 @@ def test_hmx_atom_q4_codegen():
 
 
 def test_hmx_atom_q4_llama_cpp_abi():
-    source = _lower_source(
-        make(32, 64, 64, input_dtype="float32", output_dtype="float32")
-    )
+    source = _lower_source(make(32, 64, 64, input_dtype="float32", output_dtype="float32"))
 
     assert re.search(
         r"int32_t qmatmul_hmx_atoms_kernel\(float\* A, uint8_t\* W, float\* C\)",
@@ -628,9 +613,7 @@ def test_hmx_atom_q4_checked_in_dispatch_contract():
         for k in (2048, 8192):
             stem = f"kernel_qmatmul_hmx_atoms_32x{n}x{k}"
             source = (integration / f"{stem}.cc").read_text(encoding="utf-8")
-            manifest = json.loads(
-                (integration / f"{stem}.manifest.json").read_text(encoding="utf-8")
-            )
+            manifest = json.loads((integration / f"{stem}.manifest.json").read_text(encoding="utf-8"))
             kernel_symbol = f"tl_q4_hmx_m32_n{n}_k{k}_kernel"
             embedded_symbol = f"tl_q4_hmx_m32_n{n}_k{k}_embedded"
             assert manifest["kernel_entry"].startswith(f"int32_t {kernel_symbol}(")
@@ -646,15 +629,13 @@ def test_hmx_atom_q4_checked_in_dispatch_contract():
     for k in (2048, 8192):
         stem = f"kernel_qmatmul_hmx_staged_32x256x{k}"
         source = (integration / f"{stem}.cc").read_text(encoding="utf-8")
-        manifest = json.loads(
-            (integration / f"{stem}.manifest.json").read_text(encoding="utf-8")
-        )
+        manifest = json.loads((integration / f"{stem}.manifest.json").read_text(encoding="utf-8"))
         assert manifest["dequantization"] == "parallel_range_of_hvx_q4_tile_atoms"
         assert manifest["padded_weight_format"]["dma"] == "2D 576B -> 640B rows"
         for entry in manifest["entries"].values():
             assert f"int32_t {entry}(" in source
             assert entry in bridge
-        assert "int32_t tile_begin, int32_t tile_end" in source
+        assert re.search(r"int32_t\s+tile_begin,\s*int32_t\s+tile_end", source)
         assert "* (int64_t)640" in source
         assert "tl_hexagon_q4_0_dequant_tile_32x32" in source
         assert "tl_hexagon_hmx_mma_atom" in source
@@ -688,12 +669,10 @@ def test_hmx_deep_chunk_bounds_and_native_offsets(tiles):
     emitter = HMXIntrinEmitter(32, 32, tiles * 32, b_transposed=True)
 
     @T.prim_func
-    def probe(A: T.Tensor((32, tiles * 32), "float16"),
-              B: T.Tensor((32, tiles * 32), "float16")):
+    def probe(A: T.Tensor((32, tiles * 32), "float16"), B: T.Tensor((32, tiles * 32), "float16")):
         with T.Kernel(1, threads=1):
             acc = T.alloc_hmx_accumulator()
-            T.annotate_layout({A: emitter.activation_layout(A),
-                               B: emitter.weight_layout(B)})
+            T.annotate_layout({A: emitter.activation_layout(A), B: emitter.weight_layout(B)})
             emitter.acquire(acc)
             emitter.clear(acc)
             emitter.mma_tile(acc, A, B)
@@ -701,8 +680,7 @@ def test_hmx_deep_chunk_bounds_and_native_offsets(tiles):
 
     target = determine_target("hexagon", return_object=True)
     with target:
-        artifact = tilelang.lower(probe, target=target, enable_host_codegen=False,
-                                  enable_device_compile=False)
+        artifact = tilelang.lower(probe, target=target, enable_host_codegen=False, enable_device_compile=False)
     source = str(artifact.kernel_source)
     call = next(line for line in source.splitlines() if "tl_hexagon_hmx_mma_atom(" in line)
     if tiles <= 32:
@@ -712,9 +690,11 @@ def test_hmx_deep_chunk_bounds_and_native_offsets(tiles):
         assert f"k_chunk < {(tiles + 31) // 32}" in source
 
     calls = []
+
     def collect(node):
         if isinstance(node, tvm.tirx.Call) and node.op == tvm.ir.Op.get("tl.hexagon_hmx_mma"):
             calls.append(node)
+
     for func in artifact.device_mod.functions.values():
         tvm.tirx.stmt_functor.post_order_visit(func.body, collect)
     assert len(calls) == 1
@@ -722,16 +702,14 @@ def test_hmx_deep_chunk_bounds_and_native_offsets(tiles):
     analyzer = tvm.arith.Analyzer()
     for chunk in range((tiles + 31) // 32):
         expected = min(tiles - chunk * 32, 32)
-        for expr, value in [(mma.args[3], expected),
-                            (mma.args[1].args[3], expected * 1024),
-                            (mma.args[2].args[3], expected * 1024)]:
+        for expr, value in [(mma.args[3], expected), (mma.args[1].args[3], expected * 1024), (mma.args[2].args[3], expected * 1024)]:
             variables = []
             tvm.tirx.stmt_functor.post_order_visit(
-                expr, lambda node: variables.append(node) if isinstance(node, tvm.tirx.Var) else None)
+                expr, lambda node, variables=variables: variables.append(node) if isinstance(node, tvm.tirx.Var) else None
+            )
             assert all(var.name == "k_chunk" for var in variables)
             evaluated = tvm.tirx.stmt_functor.substitute(expr, {var: chunk for var in variables})
             assert int(analyzer.simplify(evaluated)) == value
-
 
 
 @pytest.mark.parametrize("count", [0, -1, 33])

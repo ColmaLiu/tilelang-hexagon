@@ -18,6 +18,7 @@ inferred for B to invoke the Crouton pack helper instead of scalar scatter store
 
 Requires a Hexagon device over adb + the Hexagon SDK. See README.md.
 """
+
 import argparse
 import numpy as np
 import torch
@@ -29,23 +30,25 @@ def make_qmatmul(M, N, K, W=128):
     KH = K // 2
 
     @T.prim_func
-    def qmatmul(A: T.Tensor((M, K), "float16"),      # activation
-                qcm: T.Tensor((KH, N), "uint8"),      # q4_0 weight, column-major packed
-                scb: T.Tensor((K, N), "float16"),     # per-(k,n) scale
-                C: T.Tensor((M, N), "float16")):
+    def qmatmul(
+        A: T.Tensor((M, K), "float16"),  # activation
+        qcm: T.Tensor((KH, N), "uint8"),  # q4_0 weight, column-major packed
+        scb: T.Tensor((K, N), "float16"),  # per-(k,n) scale
+        C: T.Tensor((M, N), "float16"),
+    ):
         with T.Kernel(1, threads=1) as _:
             B_row = T.alloc_shared((K, N), "float16")  # dequantized row-major VTCM
             A_hmx = T.alloc_shared((M, K), "float16")
             B_hmx = T.alloc_shared((K, N), "float16")
             C_hmx = T.alloc_shared((M, N), "float16")
             T.copy(A, A_hmx)
-            for j in T.serial(KH):                     # DSL q4_0 dequant -> full-width HVX
+            for j in T.serial(KH):  # DSL q4_0 dequant -> full-width HVX
                 for no in T.serial(N // W):
                     for ni in T.vectorized(W):
                         n = no * W + ni
-                        q = T.Cast("int16", qcm[j, n])                       # widen first
+                        q = T.Cast("int16", qcm[j, n])  # widen first
                         lo = (q & T.Cast("int16", 0xF)) - T.Cast("int16", 8)  # low nibble
-                        hi = (q >> T.Cast("int16", 4)) - T.Cast("int16", 8)   # high nibble
+                        hi = (q >> T.Cast("int16", 4)) - T.Cast("int16", 8)  # high nibble
                         B_row[2 * j, n] = T.Cast("float16", lo) * scb[2 * j, n]
                         B_row[2 * j + 1, n] = T.Cast("float16", hi) * scb[2 * j + 1, n]
             T.copy(B_row, B_hmx)
@@ -62,17 +65,16 @@ def main():
     p.add_argument("--k", type=int, default=2048)
     args = p.parse_args()
     M, N, K = args.m, args.n, args.k
-    KH = K // 2
 
     rng = np.random.default_rng(0)
-    nib = rng.integers(0, 16, size=(N, K), dtype=np.uint8)                 # weight nibbles [N][K]
+    nib = rng.integers(0, 16, size=(N, K), dtype=np.uint8)  # weight nibbles [N][K]
     scales = (rng.standard_normal((N, K // 32)) * 0.05).astype(np.float16)  # per 32-K block
     Wq = ((nib.astype(np.float32) - 8.0) * np.repeat(scales.astype(np.float32), 32, axis=1)).astype(np.float16)
     # column-major pack: qcm[j][n] low nibble = W[n][2j], high = W[n][2j+1]
-    qcm = (nib[:, 0::2].T | (nib[:, 1::2].T << 4)).astype(np.uint8)         # [K/2][N]
-    scb = np.repeat(scales, 32, axis=1).T.astype(np.float16)               # [K][N]
+    qcm = (nib[:, 0::2].T | (nib[:, 1::2].T << 4)).astype(np.uint8)  # [K/2][N]
+    scb = np.repeat(scales, 32, axis=1).T.astype(np.float16)  # [K][N]
     A = (rng.standard_normal((M, K)) * 0.1).astype(np.float16)
-    ref = A.astype(np.float32) @ Wq.astype(np.float32).T                   # [M][N]
+    ref = A.astype(np.float32) @ Wq.astype(np.float32).T  # [M][N]
 
     kernel = tilelang.compile(make_qmatmul(M, N, K), out_idx=[3], target="hexagon")
     C = kernel(torch.from_numpy(A), torch.from_numpy(qcm), torch.from_numpy(scb)).cpu().numpy().astype(np.float32)

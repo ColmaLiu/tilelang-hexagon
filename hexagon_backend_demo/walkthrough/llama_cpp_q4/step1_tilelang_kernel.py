@@ -31,9 +31,7 @@ def make_pack_stage():
         bias_vtcm: T.Tensor((64,), "uint32"),
     ):
         with T.Kernel(1, threads=1):
-            T.annotate_layout(
-                {activation_hmx: hmx.activation_layout(activation_hmx)}
-            )
+            T.annotate_layout({activation_hmx: hmx.activation_layout(activation_hmx)})
             for lane in T.serial(32):
                 bias_vtcm[lane] = T.Cast("uint32", 0x3C00)
                 bias_vtcm[32 + lane] = T.Cast("uint32", 0)

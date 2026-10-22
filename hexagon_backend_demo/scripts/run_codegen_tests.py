@@ -29,11 +29,7 @@ def main() -> None:
         root / "testing/python/hexagon/test_tilelang_hmx_intrin.py",
         "test_tilelang_hmx_intrin",
     )
-    tests = [
-        (name, getattr(q4, name))
-        for name in dir(q4)
-        if name.startswith("test_")
-    ]
+    tests = [(name, getattr(q4, name)) for name in dir(q4) if name.startswith("test_")]
     for name, test in tests:
         print(f"[q4] {name}")
         test()

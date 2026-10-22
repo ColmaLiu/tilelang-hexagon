@@ -15,6 +15,7 @@ generated agent, so only raw bytes cross the wire.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import os
 import select
 import socket
@@ -58,14 +59,11 @@ class HexagonAgentSession:
         self._sh(f"chmod 755 {exe}")
         self._exe_name = os.path.basename(exe)
 
-        subprocess.run(self._base + ["forward", f"tcp:{self.host_port}", f"tcp:{self.device_port}"],
-                       check=True, capture_output=True)
+        subprocess.run(self._base + ["forward", f"tcp:{self.host_port}", f"tcp:{self.device_port}"], check=True, capture_output=True)
 
         adsp = os.pathsep.join([workdir, *_DEFAULT_ADSP_DIRS])
-        cmd = (f"cd {workdir} && LD_LIBRARY_PATH={workdir} ADSP_LIBRARY_PATH={adsp} "
-               f"./{self._exe_name} {self.device_port}")
-        self._proc = subprocess.Popen(self._base + ["shell", cmd], stdout=subprocess.PIPE,
-                                      stderr=subprocess.STDOUT, text=True)
+        cmd = f"cd {workdir} && LD_LIBRARY_PATH={workdir} ADSP_LIBRARY_PATH={adsp} ./{self._exe_name} {self.device_port}"
+        self._proc = subprocess.Popen(self._base + ["shell", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         self._wait_ready(ready_timeout)
         self._sock = self._connect()
         # __del__ isn't guaranteed to run at interpreter shutdown, so register an
@@ -118,25 +116,17 @@ class HexagonAgentSession:
         if getattr(self, "_closed", False):
             return
         self._closed = True
-        try:
+        with contextlib.suppress(Exception):
             atexit.unregister(self.close)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
+        with contextlib.suppress(Exception):
             self._sock.sendall(b"\x02")  # shutdown
             self._sock.close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
+        with contextlib.suppress(Exception):
             # Match exe name AND port so concurrent adapters for the same kernel
             # (distinct ports, see HexagonKernelAdapter) don't kill each other.
             self._sh(f"pkill -f '{self._exe_name} {self.device_port}'")
-        except Exception:  # noqa: BLE001
-            pass
-        try:
+        with contextlib.suppress(Exception):
             self._proc.terminate()
-        except Exception:  # noqa: BLE001
-            pass
         subprocess.run(self._base + ["forward", "--remove", f"tcp:{self.host_port}"], capture_output=True)
 
     def __enter__(self):
@@ -168,7 +158,7 @@ class HexagonAgentSession:
         changed = set(range(n_in)) if changed is None else set(changed)
         mask = 0
         for i in changed:
-            mask |= (1 << i)
+            mask |= 1 << i
         self._sock.sendall(bytes([1, mask]))  # op=run, then the changed-mask
         in_i = 0
         for pl in self.plans:

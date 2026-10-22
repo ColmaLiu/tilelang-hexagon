@@ -89,7 +89,10 @@ class AdbConnection(HexagonConnection):
     # ---- helpers ----------------------------------------------------------
     def _run(self, argv: list[str], timeout: float | None = None) -> tuple[int, str]:
         proc = subprocess.run(
-            self._base + argv, capture_output=True, text=True, timeout=timeout,
+            self._base + argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
             stdin=subprocess.DEVNULL,
         )
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")

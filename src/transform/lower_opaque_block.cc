@@ -65,7 +65,8 @@ public:
       f = WithAttr(std::move(f), "cluster_dims", lower.cluster_dims_.value());
     }
     if (lower.num_workers_.has_value()) {
-      f = WithAttr(std::move(f), "hexagon.num_workers", lower.num_workers_.value());
+      f = WithAttr(std::move(f), "hexagon.num_workers",
+                   lower.num_workers_.value());
     }
     return f;
   }
@@ -292,8 +293,9 @@ private:
         if (auto n = kv.second.try_cast<Integer>()) {
           num_workers_ = n.value();
         } else {
-          LOG(FATAL) << "Expected `hexagon.num_workers` to be an Integer, but got "
-                     << kv.second.GetTypeKey();
+          LOG(FATAL)
+              << "Expected `hexagon.num_workers` to be an Integer, but got "
+              << kv.second.GetTypeKey();
         }
       } else if (!is_block) {
         // the loop annotation is preserved

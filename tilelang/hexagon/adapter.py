@@ -11,6 +11,7 @@ persistent low-latency agent is an M3 concern.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import os
 import re
@@ -96,9 +97,7 @@ class HexagonKernelAdapter(BaseKernelAdapter):
         return self._conn
 
     def _deploy(self) -> None:
-        proj, iface = _fastrpc.write_project(
-            self._workdir, self.kernel_name, self.kernel_source, self._param_list, self._result_idx
-        )
+        proj, iface = _fastrpc.write_project(self._workdir, self.kernel_name, self.kernel_source, self._param_list, self._result_idx)
         self._iface = iface
         if self.verbose:
             print(f"[hexagon] FastRPC project: {proj} (iface={iface})")
@@ -114,10 +113,14 @@ class HexagonKernelAdapter(BaseKernelAdapter):
         has_scalar = any(p.is_scalar() for p in self._param_list)
         if self._use_agent and artifacts.agent_exe and not has_scalar:
             from .agent import HexagonAgentSession
+
             idx = next(HexagonKernelAdapter._port_seq)
             port = 10000 + (os.getpid() * 13 + idx) % 40000
             self._agent = HexagonAgentSession(
-                artifacts.dsp_skel, artifacts.agent_exe, self._param_list, self._result_idx,
+                artifacts.dsp_skel,
+                artifacts.agent_exe,
+                self._param_list,
+                self._result_idx,
                 serial=getattr(conn, "serial", None),
                 device_port=port,
                 workdir=f"/data/local/tmp/tilelang_hex_agent_{os.getpid()}_{idx}",
@@ -131,16 +134,14 @@ class HexagonKernelAdapter(BaseKernelAdapter):
             self._agent = None
 
     def __del__(self):
-        try:
+        with contextlib.suppress(Exception):
             self.close()
-        except Exception:  # noqa: BLE001
-            pass
 
     def _agent_forward(self, *ins):
         params, result_idx = self._param_list, set(self._result_idx)
         it = iter(ins)
         in_arrays = []
-        for i, p in enumerate(params):
+        for i, _param in enumerate(params):
             if i in result_idx:
                 continue
             in_arrays.append(next(it).detach().to("cpu").contiguous().numpy())
@@ -166,9 +167,7 @@ class HexagonKernelAdapter(BaseKernelAdapter):
             it = iter(ins)
             for i, p in enumerate(params):
                 if i in result_idx:
-                    values[i] = torch.empty(
-                        tuple(int(s) for s in p.shape), dtype=p.torch_dtype(), device="cpu"
-                    )
+                    values[i] = torch.empty(tuple(int(s) for s in p.shape), dtype=p.torch_dtype(), device="cpu")
                 else:
                     t = next(it)
                     values[i] = t.detach().to("cpu").contiguous()

@@ -45,10 +45,7 @@ def _validate_matrix_shape(shape: tuple, name: str) -> tuple[int, int]:
     rows = _static_extent(shape[-2], f"{name} rows")
     cols = _static_extent(shape[-1], f"{name} columns")
     if rows <= 0 or cols <= 0 or rows % TILE or cols % TILE:
-        raise ValueError(
-            f"HMX {name} dimensions must be positive multiples of {TILE}; "
-            f"got ({rows}, {cols})"
-        )
+        raise ValueError(f"HMX {name} dimensions must be positive multiples of {TILE}; got ({rows}, {cols})")
     for i, extent in enumerate(shape[:-2]):
         _static_extent(extent, f"{name} prefix dimension {i}")
     return rows, cols
@@ -63,9 +60,7 @@ def make_hmx_crouton_layout() -> T.Layout:
     )
 
 
-def _expand_matrix_layout(
-    shape: tuple, tile_order: tuple[int, int], name: str
-) -> T.Layout:
+def _expand_matrix_layout(shape: tuple, tile_order: tuple[int, int], name: str) -> T.Layout:
     rows, cols = _validate_matrix_shape(shape, name)
     factors = (rows // TILE, cols // TILE)
     layout = make_hmx_crouton_layout()
@@ -123,10 +118,7 @@ def _buffer_prefix(buffer, prefix, name: str) -> tuple:
     rank = len(getattr(buffer, "shape", ()))
     expected = max(rank - 2, 0)
     if len(prefix) != expected:
-        raise ValueError(
-            f"HMX {name} expects {expected} prefix indices for a rank-{rank} buffer; "
-            f"got {len(prefix)}"
-        )
+        raise ValueError(f"HMX {name} expects {expected} prefix indices for a rank-{rank} buffer; got {len(prefix)}")
     return prefix
 
 

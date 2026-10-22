@@ -582,7 +582,7 @@ TVM_REGISTER_OP("tl.dma_wait")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "dma_wait")
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
-                             Integer(CallEffectKind::kOpaque));
+                               Integer(CallEffectKind::kOpaque));
 
 TVM_REGISTER_OP("tl.tileop.async_copy")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "async_copy")

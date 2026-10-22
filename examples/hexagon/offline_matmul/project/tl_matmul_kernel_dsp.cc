@@ -1,10 +1,10 @@
 // Auto-generated FastRPC skel impl for a tilelang Hexagon kernel.
+#include "tl_matmul_kernel.h" // QAIC-generated handler prototypes
 #include <AEEStdErr.h>
 #include <type_traits>
-#include "tl_matmul_kernel.h"   // QAIC-generated handler prototypes
 
-#include <tl_templates/hexagon/vtcm.h>
 #include <tl_templates/hexagon/hmx.h>
+#include <tl_templates/hexagon/vtcm.h>
 // ---- the tilelang-generated device kernel ----
 // tilelang Hexagon (cDSP) kernel
 #include <tl_templates/hexagon/common.h>
@@ -12,15 +12,15 @@
 #ifdef __cplusplus
 extern "C"
 #endif
-int32_t matmul_kernel(half* A, half* B, half* C) {
+    int32_t matmul_kernel(half *A, half *B, half *C) {
   int bx = 0;
   for (bx = 0; bx < 4; ++bx) {
-    uint8_t* buf_dyn_shmem = (uint8_t*)((char*)tl_vtcm_base() + 2048);
+    uint8_t *buf_dyn_shmem = (uint8_t *)((char *)tl_vtcm_base() + 2048);
     tl_vtcm_shared_high_water = 77824u;
-    void* A_hmx = ((void*)((char*)buf_dyn_shmem + 0));
-    void* B_hmx = ((void*)((char*)buf_dyn_shmem + 32768));
-    void* bias_vtcm = ((void*)((char*)buf_dyn_shmem + 65536));
-    void* C_hmx = ((void*)((char*)buf_dyn_shmem + 67584));
+    void *A_hmx = ((void *)((char *)buf_dyn_shmem + 0));
+    void *B_hmx = ((void *)((char *)buf_dyn_shmem + 32768));
+    void *bias_vtcm = ((void *)((char *)buf_dyn_shmem + 65536));
+    void *C_hmx = ((void *)((char *)buf_dyn_shmem + 67584));
     int by = 0;
     for (by = 0; by < 4; ++by) {
       int tx = 0;
@@ -29,29 +29,46 @@ int32_t matmul_kernel(half* A, half* B, half* C) {
         for (ty = 0; ty < 1; ++ty) {
           int tz = 0;
           for (tz = 0; tz < 1; ++tz) {
-            tl_hexagon_hmx_pack_crouton((&(((half*)A_hmx)[0])), (&(A[(by * 16384)])), 64, 256, 256, 1, 0);
-            tl_hexagon_hmx_pack_crouton((&(((half*)B_hmx)[0])), (&(B[(bx * 64)])), 256, 64, 256, 1, 1);
+            tl_hexagon_hmx_pack_crouton((&(((half *)A_hmx)[0])),
+                                        (&(A[(by * 16384)])), 64, 256, 256, 1,
+                                        0);
+            tl_hexagon_hmx_pack_crouton((&(((half *)B_hmx)[0])),
+                                        (&(B[(bx * 64)])), 256, 64, 256, 1, 1);
             uint8_t acc[1];
             uint8_t bias[1];
             uint8_t cvt[1];
             for (int32_t i = 0; i < 32; ++i) {
-              ((uint32_t*)bias_vtcm)[i] = (uint32_t)15360;
-              ((uint32_t*)bias_vtcm)[(i + 32)] = (uint32_t)0;
+              ((uint32_t *)bias_vtcm)[i] = (uint32_t)15360;
+              ((uint32_t *)bias_vtcm)[(i + 32)] = (uint32_t)0;
             }
             tl_hexagon_hmx_acc_acquire((&(acc[0])));
             for (int32_t inst_m_idx = 0; inst_m_idx < 2; ++inst_m_idx) {
               for (int32_t inst_n_idx = 0; inst_n_idx < 2; ++inst_n_idx) {
                 tl_hexagon_hmx_clear_acc((&(acc[0])));
-                tl_hexagon_hmx_load_bias((&(bias[0])), (&(((uint32_t*)bias_vtcm)[0])));
+                tl_hexagon_hmx_load_bias((&(bias[0])),
+                                         (&(((uint32_t *)bias_vtcm)[0])));
                 for (int32_t k_inner = 0; k_inner < 8; ++k_inner) {
-                  tl_hexagon_hmx_mma_atom((&(acc[0])), (&(((half*)A_hmx)[((inst_m_idx * 8192) + (k_inner * 1024))])), (&(((half*)B_hmx)[((inst_n_idx * 8192) + (k_inner * 1024))])));
+                  tl_hexagon_hmx_mma_atom(
+                      (&(acc[0])),
+                      (&(((half *)A_hmx)[((inst_m_idx * 8192) +
+                                          (k_inner * 1024))])),
+                      (&(((half *)B_hmx)[((inst_n_idx * 8192) +
+                                          (k_inner * 1024))])));
                 }
-                tl_hexagon_hmx_convert_acc((&(cvt[0])), (&(acc[0])), (&(bias[0])), (&(((uint32_t*)bias_vtcm)[0])), 2);
-                tl_hexagon_hmx_store_cvt_state((&(cvt[0])), (&(((half*)C_hmx)[((inst_m_idx * 2048) + (inst_n_idx * 1024))])), (&(acc[0])), (&(bias[0])), (&(((uint32_t*)bias_vtcm)[0])));
+                tl_hexagon_hmx_convert_acc((&(cvt[0])), (&(acc[0])),
+                                           (&(bias[0])),
+                                           (&(((uint32_t *)bias_vtcm)[0])), 2);
+                tl_hexagon_hmx_store_cvt_state(
+                    (&(cvt[0])),
+                    (&(((half *)C_hmx)[((inst_m_idx * 2048) +
+                                        (inst_n_idx * 1024))])),
+                    (&(acc[0])), (&(bias[0])), (&(((uint32_t *)bias_vtcm)[0])));
               }
             }
             tl_hexagon_hmx_acc_release((&(acc[0])));
-            tl_hexagon_hmx_unpack_crouton((&(C[((by * 16384) + (bx * 64))])), (&(((half*)C_hmx)[0])), 64, 64, 256, 1, 0);
+            tl_hexagon_hmx_unpack_crouton((&(C[((by * 16384) + (bx * 64))])),
+                                          (&(((half *)C_hmx)[0])), 64, 64, 256,
+                                          1, 0);
           }
         }
       }
@@ -60,10 +77,8 @@ int32_t matmul_kernel(half* A, half* B, half* C) {
   return TL_OK;
 }
 
-
-
 template <typename Fn>
-static AEEResult tl_hexagon_forward_kernel_status(Fn&& fn) {
+static AEEResult tl_hexagon_forward_kernel_status(Fn &&fn) {
   if constexpr (std::is_void_v<decltype(fn())>) {
     fn();
     return AEE_SUCCESS;
@@ -77,11 +92,26 @@ static AEEResult tl_hexagon_forward_kernel_status(Fn&& fn) {
 extern "C" {
 #endif
 
-AEEResult tl_matmul_kernel_open(const char* uri, remote_handle64* h) { (void)uri; *h = 0; tl_hmx_session_init(); if (!tl_hmx_session_ok()) return AEE_EFAILED; return AEE_SUCCESS; }
-AEEResult tl_matmul_kernel_close(remote_handle64 h) { (void)h; tl_hmx_session_deinit(); return AEE_SUCCESS; }
+AEEResult tl_matmul_kernel_open(const char *uri, remote_handle64 *h) {
+  (void)uri;
+  *h = 0;
+  tl_hmx_session_init();
+  if (!tl_hmx_session_ok())
+    return AEE_EFAILED;
+  return AEE_SUCCESS;
+}
+AEEResult tl_matmul_kernel_close(remote_handle64 h) {
+  (void)h;
+  tl_hmx_session_deinit();
+  return AEE_SUCCESS;
+}
 
-AEEResult tl_matmul_kernel_run(remote_handle64 _h, const unsigned char* p0, int p0Len, const unsigned char* p1, int p1Len, unsigned char* p2, int p2Len) {
-  return tl_hexagon_forward_kernel_status([&]() { return matmul_kernel((__fp16*)p0, (__fp16*)p1, (__fp16*)p2); });
+AEEResult tl_matmul_kernel_run(remote_handle64 _h, const unsigned char *p0,
+                               int p0Len, const unsigned char *p1, int p1Len,
+                               unsigned char *p2, int p2Len) {
+  return tl_hexagon_forward_kernel_status([&]() {
+    return matmul_kernel((__fp16 *)p0, (__fp16 *)p1, (__fp16 *)p2);
+  });
 }
 
 #ifdef __cplusplus

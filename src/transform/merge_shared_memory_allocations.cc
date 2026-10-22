@@ -403,9 +403,9 @@ private:
       if (alignment <= 0) {
         // TMA bulk-copy operands have stricter shared-memory alignment than
         // ordinary scalar/shared accesses. Hopper keeps the existing 1024-byte
-        // alignment used by the WGMMA/TMA path, while Blackwell/SM120 also needs
-        // TMA sources at least 128-byte aligned to avoid misaligned-address
-        // launch failures.
+        // alignment used by the WGMMA/TMA path, while Blackwell/SM120 also
+        // needs TMA sources at least 128-byte aligned to avoid
+        // misaligned-address launch failures.
         alignment = 16;
         if (TargetIsHopper(target)) {
           alignment = 1024;
@@ -1696,9 +1696,9 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
     if (auto target = f->GetAttr<Target>(tvm::attr::kTarget)) {
       preserve_aliases = target.value()->kind->name != "webgpu";
       // Hexagon: align merged VTCM tiles to the 128-byte HVX vector so the
-      // elementwise codegen vectorizer can emit aligned vmem (not vmemu), and so
-      // a small (e.g. fp32) tile between two fp16 tiles can't push the next off
-      // 128-byte alignment.
+      // elementwise codegen vectorizer can emit aligned vmem (not vmemu), and
+      // so a small (e.g. fp32) tile between two fp16 tiles can't push the next
+      // off 128-byte alignment.
       if (target.value()->kind->name == "hexagon" && eff_align < 128)
         eff_align = 128;
     }
@@ -1710,9 +1710,11 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
       if (target.value()->kind->name == "hexagon") {
         PostOrderVisit(f->body, [&](const ObjectRef &node) {
           if (const auto *call = node.as<CallNode>()) {
-            if (call->op.same_as(builtin::call_extern()) && !call->args.empty()) {
+            if (call->op.same_as(builtin::call_extern()) &&
+                !call->args.empty()) {
               if (const auto *name = call->args[0].as<StringImmNode>())
-                async_dma |= name->value.find("tl_hexagon_dma_async_copy_") == 0;
+                async_dma |=
+                    name->value.find("tl_hexagon_dma_async_copy_") == 0;
             }
           }
         });
