@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Android uses ADB directly. SSH is an optional Linux BSP transport.
-if [ -z "${TILELANG_HEXAGON_SSH_HOST:-}" ]; then
+if [ "${TILELANG_HEXAGON_HLOS:-android}" != linux ] || [ -z "${TILELANG_HEXAGON_SSH_HOST:-}" ]; then
   exit 0
 fi
 

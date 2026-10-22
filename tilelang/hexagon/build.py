@@ -90,11 +90,13 @@ def build_cmake_fastrpc(
         raise HexagonBuildError(f"Unsupported HLOS: {hlos}")
     if hlos == "linux":
         from .linux_runtime import build_linux_fastrpc
+
         return build_linux_fastrpc(project_dir, name, sdk, dsp_arch, build_host, verbose)
     env = sdk.environ
     build_cmake = sdk.build_cmake
 
-    _run([build_cmake, "hexagon", f"DSP_ARCH={dsp_arch}"], cwd=project_dir, env=env, verbose=verbose)
+    # Never inherit a Linux BSP compatibility setting from a reused CMake tree.
+    _run([build_cmake, "hexagon", f"DSP_ARCH={dsp_arch}", "TL_HEXAGON_LEGACY_COMPUTE_RES=OFF"], cwd=project_dir, env=env, verbose=verbose)
     if build_host:
         _run([build_cmake, "android"], cwd=project_dir, env=env, verbose=verbose)
 

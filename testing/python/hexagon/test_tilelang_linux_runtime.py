@@ -2,11 +2,20 @@
 
 import os
 import struct
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tilelang.hexagon import adapter, build, device, elf_crc, env, linux_build, linux_runtime
+
+
+@pytest.fixture(autouse=True)
+def clean_runtime_environment(monkeypatch):
+    # These tests also run inside the SA8650 image, whose defaults enable Linux.
+    for name in list(os.environ):
+        if name.startswith("TILELANG_HEXAGON_") or name == "HEXAGON_DSP_ARCH":
+            monkeypatch.delenv(name)
 
 
 class FakeSDK:
@@ -18,11 +27,14 @@ class FakeSDK:
         return self
 
 
-@pytest.mark.parametrize("configured, explicit, expected", [
-    (None, None, "v79"),
-    ("v73", None, "v73"),
-    ("v73", "v79", "v79"),
-])
+@pytest.mark.parametrize(
+    "configured, explicit, expected",
+    [
+        (None, None, "v79"),
+        ("v73", None, "v73"),
+        ("v73", "v79", "v79"),
+    ],
+)
 def test_adapter_architecture_respects_environment_and_explicit_argument(monkeypatch, tmp_path, configured, explicit, expected):
     monkeypatch.delenv("HEXAGON_DSP_ARCH", raising=False)
     if configured:
@@ -49,28 +61,32 @@ def test_adapter_selects_linux_connection_only_for_linux(monkeypatch):
     assert type(instance._connection()) is linux_runtime.LinuxConnection
 
 
-def test_linux_build_does_not_build_android_agent(monkeypatch):
+@pytest.mark.parametrize("legacy", ["0", "1"])
+def test_linux_build_does_not_build_android_agent(monkeypatch, legacy):
     monkeypatch.setenv("TILELANG_HEXAGON_HLOS", "linux")
     monkeypatch.setenv("TILELANG_HEXAGON_ELF_CRC", "0")
+    monkeypatch.setenv("TILELANG_HEXAGON_LEGACY_COMPUTE_RES", legacy)
     calls = []
     monkeypatch.setattr(build, "_run", lambda argv, **kwargs: calls.append(argv))
     monkeypatch.setattr(build, "_find_one", lambda patterns: "/project/skel.so")
     monkeypatch.setattr(linux_build, "build_linux_host", lambda *args: "/project/linux/driver")
     monkeypatch.setattr(linux_build, "validate_dsp_artifact", lambda *args: None)
     artifacts = build.build_cmake_fastrpc("/project", "example", sdk=FakeSDK())
-    assert calls == [["/sdk/build_cmake", "hexagon", "DSP_ARCH=v73"]]
+    assert calls == [["/sdk/build_cmake", "hexagon", "DSP_ARCH=v73", "TL_HEXAGON_LEGACY_COMPUTE_RES=" + ("ON" if legacy == "1" else "OFF")]]
     assert artifacts.host_exe == "/project/linux/driver"
     assert artifacts.agent_exe == ""
 
 
 def test_android_build_remains_default(monkeypatch):
     monkeypatch.delenv("TILELANG_HEXAGON_HLOS", raising=False)
+    monkeypatch.setenv("TILELANG_HEXAGON_LEGACY_COMPUTE_RES", "1")
     calls = []
     monkeypatch.setattr(build, "_run", lambda argv, **kwargs: calls.append(argv))
     products = iter(["/project/skel.so", "/project/host", "/project/agent"])
     monkeypatch.setattr(build, "_find_one", lambda patterns: next(products))
     artifacts = build.build_cmake_fastrpc("/project", "example", sdk=FakeSDK())
     assert [argv[1] for argv in calls] == ["hexagon", "android"]
+    assert "TL_HEXAGON_LEGACY_COMPUTE_RES=OFF" in calls[0]
     assert artifacts.host_exe == "/project/host"
     assert artifacts.agent_exe == "/project/agent"
 
@@ -106,7 +122,7 @@ def test_android_adb_ignores_linux_ssh_configuration(monkeypatch):
     monkeypatch.setenv("TILELANG_HEXAGON_SSH_HOST", "root@board")
     conn = device.AdbConnection(serial="android")
     calls = []
-    monkeypatch.setattr(conn, "_run", lambda argv, **kwargs: (calls.append(argv) or (0, "android")))
+    monkeypatch.setattr(conn, "_run", lambda argv, **kwargs: calls.append(argv) or (0, "android"))
     assert conn.shell("echo android") == (0, "android")
     assert calls == [["shell", "echo android"]]
 
@@ -116,7 +132,87 @@ def test_linux_connection_uses_configured_device_and_workdir(monkeypatch):
     monkeypatch.setenv("TILELANG_HEXAGON_REMOTE_DIR", "/tmp/pr_test")
     conn = linux_runtime.LinuxConnection.from_environment()
     assert conn.serial == "board:5555"
-    assert conn.workdir == "/tmp/pr_test"
+    assert Path(conn.workdir).parent == Path("/tmp/pr_test")
+    assert conn.workdir != linux_runtime.LinuxConnection.from_environment().workdir
+
+
+def test_linux_default_parent_is_tmp(monkeypatch):
+    monkeypatch.setenv("TILELANG_HEXAGON_DEVICE", "board")
+    assert Path(linux_runtime.LinuxConnection.from_environment().workdir).parent == Path("/tmp/tilelang_hexagon")
+
+
+def test_linux_transport_does_not_change_with_environment(monkeypatch):
+    monkeypatch.setenv("TILELANG_HEXAGON_DEVICE", "first:5555")
+    monkeypatch.setenv("TILELANG_HEXAGON_SSH_HOST", "root@first")
+    monkeypatch.setenv("TILELANG_HEXAGON_SSH_KNOWN_HOSTS", "/first/known_hosts")
+    monkeypatch.setenv("ADB_SERVER_SOCKET", "tcp:localhost:5037")
+    conn = linux_runtime.LinuxConnection.from_environment()
+    monkeypatch.setenv("TILELANG_HEXAGON_DEVICE", "second:5555")
+    monkeypatch.setenv("TILELANG_HEXAGON_SSH_HOST", "root@second")
+    monkeypatch.setenv("TILELANG_HEXAGON_SSH_KNOWN_HOSTS", "/second/known_hosts")
+    monkeypatch.setenv("ADB_SERVER_SOCKET", "tcp:localhost:5038")
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs["env"]))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(linux_runtime.subprocess, "run", run)
+    conn.shell("true")
+    conn._run(["push", "input", "output"])
+    assert calls[0][0][-2] == "root@first"
+    assert "UserKnownHostsFile=/first/known_hosts" in calls[0][0]
+    assert calls[1][0][1:3] == ["-s", "first:5555"]
+    assert all(env["ADB_SERVER_SOCKET"] == "tcp:localhost:5037" for _, env in calls)
+
+
+def test_two_same_named_linux_kernels_keep_separate_deployments(monkeypatch, tmp_path):
+    monkeypatch.setenv("TILELANG_HEXAGON_HLOS", "linux")
+    monkeypatch.setenv("TILELANG_HEXAGON_DEVICE", "board")
+    monkeypatch.setenv("TILELANG_HEXAGON_REMOTE_DIR", "/tmp/shared-parent")
+    remote_files = {}
+
+    def adb(self, argv, **kwargs):
+        if argv[0] == "push":
+            remote_files[argv[2]] = Path(argv[1]).read_bytes()
+            return 0, "copied"
+        assert argv[0] == "shell"
+        return 0, f"__TILELANG_REMOTE_EXIT_{os.getpid()}__=0\n"
+
+    def compile_project(project, iface, **kwargs):
+        project = Path(project)
+        source = (project / (iface + "_dsp.cc")).read_bytes()
+        skel, host = project / ("lib" + iface + "_skel.so"), project / (iface + "_test")
+        skel.write_bytes(source)
+        host.write_bytes(source)
+        return build.FastRPCArtifacts(str(skel), str(host), "")
+
+    monkeypatch.setattr(linux_runtime.LinuxConnection, "_run", adb)
+    monkeypatch.setattr(adapter, "build_cmake_fastrpc", compile_project)
+    kernels = [
+        adapter.HexagonKernelAdapter(
+            [],
+            [],
+            None,
+            f"int32_t same_name() {{ return {value}; }}",
+            sdk=FakeSDK(),
+            workdir=str(tmp_path / str(value)),
+        )
+        for value in (11, 22)
+    ]
+    assert kernels[0]._exe_remote != kernels[1]._exe_remote
+    for kernel, value in zip(kernels, (11, 22)):
+        assert f"return {value}".encode() in remote_files[kernel._exe_remote]
+        kernel._connection().push(str(Path(kernel._workdir) / "tl_same_name_test"), "p0.bin")
+    assert len([path for path in remote_files if path.endswith("/p0.bin")]) == 2
+
+
+def test_android_honors_explicit_device(monkeypatch):
+    monkeypatch.setenv("TILELANG_HEXAGON_DEVICE", "phone")
+    monkeypatch.setattr(device.AdbConnection, "list_devices", lambda: ["board", "phone"])
+    instance = object.__new__(adapter.HexagonKernelAdapter)
+    instance._conn = None
+    assert instance._connection().serial == "phone"
 
 
 def test_linux_workdir_failure_is_reported_even_with_ssh(monkeypatch):
@@ -134,7 +230,7 @@ def test_linux_execution_sets_cdsp_path_without_diagnostic_options(monkeypatch):
     monkeypatch.setenv("TILELANG_HEXAGON_RUN_TIMEOUT", "invalid")
     conn = linux_runtime.LinuxConnection(serial="board")
     calls = []
-    monkeypatch.setattr(conn, "shell", lambda cmd, **kwargs: (calls.append(cmd) or (0, "done")))
+    monkeypatch.setattr(conn, "shell", lambda cmd, **kwargs: calls.append(cmd) or (0, "done"))
     assert conn.run_host_binary("/tmp/test/driver", ["input with spaces"]) == (0, "done")
     assert "CDSP_LIBRARY_PATH=" in calls[-1]
     assert "/vendor/dsp/cdsp;" in calls[-1]
@@ -146,8 +242,7 @@ def hexagon_elf():
     size = 136
     data = bytearray(size)
     ident = b"\x7fELF\x01\x01\x01" + bytes(9)
-    struct.pack_into("<16sHHIIIIIHHHHHH", data, 0, ident, 3, 164, 1, 0,
-                     52, 96, 0x73, 52, 32, 1, 40, 1, 0)
+    struct.pack_into("<16sHHIIIIIHHHHHH", data, 0, ident, 3, 164, 1, 0, 52, 96, 0x73, 52, 32, 1, 40, 1, 0)
     struct.pack_into("<8I", data, 52, 1, 0, 0x10000, 0x10000, size, size, 5, 4096)
     return data
 

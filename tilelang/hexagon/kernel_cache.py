@@ -11,13 +11,23 @@ intended behavior, since the device state doesn't outlive the process either.
 
 from __future__ import annotations
 
+import json
+from hashlib import sha256
+
 from tilelang.cache.kernel_cache import KernelCache
+
+from .runtime_config import cache_identity
 
 
 class HexagonKernelCache(KernelCache):
     # Cosmetic: the base always receives the backend explicitly from
     # ``_resolve_cache_dispatch``; this just documents the dispatch key.
     execution_backend = "hexagon"
+
+    def _generate_key(self, *args, **kwargs):
+        source_key = super()._generate_key(*args, **kwargs)
+        identity = json.dumps(cache_identity(), sort_keys=True)
+        return sha256((source_key + identity).encode()).hexdigest()
 
     def _save_kernel_to_disk(self, key, kernel, func=None, verbose=False):
         # No-op: an on-device deployment + live agent session isn't persistable.

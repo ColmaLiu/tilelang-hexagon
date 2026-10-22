@@ -18,21 +18,26 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Older v73 FastRPC loaders reject unresolved weak imports, including the SDK's
-// optional v2 resource API probe. A local fallback lets SDK 6.6 use the v1 API.
-// Keep other architectures unchanged; validated on SA8650/v73 only.
-#if defined(__HEXAGON_ARCH__) && __HEXAGON_ARCH__ == 73
+// Some BSP loaders reject the SDK's optional weak v2 import. Opt in only for
+// firmware known to need the legacy API (validated on SA8650/v73). ISA version
+// alone says nothing about firmware API support. With -Bsymbolic this fallback
+// binds locally, so it must remain disabled for ordinary Android/Linux builds.
+#if defined(TL_HEXAGON_LEGACY_COMPUTE_RES) && TL_HEXAGON_LEGACY_COMPUTE_RES
+#include <string.h>
 #ifdef __cplusplus
-extern "C"
+extern "C" {
 #endif
 int __attribute__((weak))
 compute_resource_attr_init_v2(compute_res_attr_t *attr, unsigned int size,
                               unsigned int version) {
-  (void)attr;
-  (void)size;
+  if (attr)
+    memset(attr, 0, size);
   (void)version;
   return -1;
 }
+#ifdef __cplusplus
+}
+#endif
 #endif
 
 #define TL_VTCM_INLINE static inline __attribute__((unused))

@@ -26,6 +26,7 @@ from . import _fastrpc
 from .build import build_cmake_fastrpc
 from .device import AdbConnection, HexagonConnection
 from .env import HexagonSDK
+from .runtime_config import device_serial
 
 # The kernel entry is the non-static generated function.  Hexagon kernels return
 # int32_t so the FastRPC skel can propagate failures; older/source kernels may
@@ -88,12 +89,10 @@ class HexagonKernelAdapter(BaseKernelAdapter):
         if self._conn is None:
             if os.environ.get("TILELANG_HEXAGON_HLOS") == "linux":
                 from .linux_runtime import LinuxConnection
+
                 self._conn = LinuxConnection.from_environment()
                 return self._conn
-            serials = AdbConnection.list_devices()
-            if not serials:
-                raise RuntimeError("no authorized adb device found (check `adb devices`)")
-            self._conn = AdbConnection(serial=serials[0])
+            self._conn = AdbConnection(serial=device_serial())
         return self._conn
 
     def _deploy(self) -> None:

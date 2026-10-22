@@ -3,7 +3,7 @@ set -e
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
-IMAGE=${IMAGE:-tilelang-hexagon:sa8650-v73-pr}
+IMAGE=${IMAGE:-tilelang-hexagon:sa8650-v73}
 
 if [ -z "$HEXAGON_SDK_PATH" ] || [ -z "$ANDROID_NDK_PATH" ]; then
   echo "Set HEXAGON_SDK_PATH and ANDROID_NDK_PATH to your installed SDK and NDK."

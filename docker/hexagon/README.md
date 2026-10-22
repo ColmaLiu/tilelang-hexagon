@@ -33,7 +33,13 @@ content. Keep them outside the checkout or under the ignored `docker/hexagon/loc
 directory. They are copied into the image at build time. Check their redistribution
 terms before publishing an image containing them.
 
-The default image is `tilelang-hexagon:sa8650-v73-pr`. Optional build variables:
+Supply an SDK containing `utils/examples/dsp_capabilities_utils.{c,h}`. The
+official CI archive omits these host helpers; an unmodified CI archive is not a
+complete input. A preinstalled `ipc/fastrpc/qaic/bin/qaic` is reused, otherwise
+the SDK's QAIC Makefile installs it. Image preparation makes QAIC executable by
+the runtime user, including when its original mode is 0750.
+
+The default image is `tilelang-hexagon:sa8650-v73`. Optional build variables:
 
 | Variable | Default / purpose |
 | --- | --- |
@@ -61,6 +67,7 @@ For a Linux board using SSH to run programs and ADB to transfer files:
 ```bash
 export TILELANG_HEXAGON_DEVICE=192.168.1.1:5555
 export TILELANG_HEXAGON_SSH_HOST=root@192.168.1.1
+adb connect "$TILELANG_HEXAGON_DEVICE"
 cd /path/to/my-work
 bash /path/to/tilelang/docker/hexagon/enter-docker.sh myname
 ```
@@ -69,6 +76,20 @@ The example address and account above must be replaced with your board's values.
 The name becomes `myname_hexagon`. The script creates it once, starts it if stopped,
 and enters it through `tilelang-entrypoint` on every invocation. `exit` leaves the
 interactive session; the container stays running in the background.
+
+A network cable is sufficient when the board exposes TCP ADB and SSH. File
+transfer still requires ADB, even when execution uses SSH. The Linux launcher
+uses `/tmp/tilelang_<container>` as a remote parent writable by the ADB user;
+override it with `TILELANG_HEXAGON_REMOTE_DIR`. Each kernel gets a unique child
+directory for its libraries, executable and tensor files. Direct Python use
+defaults to `/tmp/tilelang_hexagon`. These directories remain for inspection
+after a run; remove them only after all kernels using them have closed.
+
+`TILELANG_HEXAGON_DEVICE` selects the ADB serial on both Linux and Android. If
+unset, the first authorized device is used. Set it explicitly when both a board
+and a phone are connected. Existing Linux connections keep their transport
+settings when environment variables change; compiling again uses a separate
+cache entry for the new platform, architecture, toolchain or device settings.
 
 The current terminal directory is mounted at `/work`, and its `output/` subdirectory
 at `/output`. Files written there use the caller's UID/GID. The entrypoint also
@@ -107,9 +128,19 @@ building the image; SDK setup does not rebuild it on every kernel invocation.
 
 The accompanying Linux runtime changes add ARM64 host compilation, optional SSH
 execution, legacy ADB exit-status propagation and optional SA8650 ELF load CRC
-metadata. A v73-only weak definition handles the SDK's optional v2 resource probe
-on older FastRPC loaders; other architectures retain the original path. These
-runtime changes should be reviewed separately from the Docker files.
+metadata. `TILELANG_HEXAGON_LEGACY_COMPUTE_RES=1` explicitly enables a legacy
+resource API fallback for BSPs whose loaders reject the SDK's optional v2
+import. It is enabled in this SA8650 image and disabled by default outside the
+image. Set it to `0` for Linux BSPs with the v2 API. The fallback is selected by
+firmware compatibility, not by the DSP architecture. Android builds always
+disable it, even if the environment still contains the Linux board setting.
+`TILELANG_HEXAGON_ELF_CRC=1` separately enables the SA8650 load CRC metadata;
+set it to `0` for BSPs that do not require it.
+
+For an Android/v79 phone, create a new container with
+`TILELANG_HEXAGON_HLOS=android`, `HEXAGON_DSP_ARCH=v79` and its explicit
+`TILELANG_HEXAGON_DEVICE` serial. The launcher skips SSH initialization on this
+path; the Android host and persistent agent continue to use ADB and the NDK.
 
 Linux-specific orchestration and transport live in `tilelang/hexagon/linux_runtime.py`.
 The original `device.py` is unchanged. `adapter.py` selects that connection only
@@ -133,3 +164,27 @@ tests passed. The image was rebuilt, and HMX matmul 256x256x256 (block 64)
 passed again on SA8650/v73 without host directory mounts.
 The Add result above predates the refactor. Android/v79 hardware and its
 performance have not been validated by this contribution.
+
+Validation on 2026-10-22 after the deployment/cache/SDK fixes:
+
+- 42 host regression tests passed, including platform/device cache separation,
+  same-named kernel deployment isolation and frozen Linux transport settings.
+- The full SDK's QAIC was reinstalled as root during image preparation and then
+  executed successfully by UID 1000; no manual permission fix was needed.
+- Fresh DSL compilation of the original matmul example at sizes 256 and 128
+  (block 64) produced two distinct deployments under the default `/tmp` parent.
+  Five alternating calls passed finite-value and FP32-golden checks with maximum
+  absolute error 0.0016332, below 0.01. Disassembly contained HMX and no DMA
+  instructions. Changing SSH/ADB environment settings did not redirect the
+  existing kernels.
+- SDK 6.6 / Tools 19.0.07 resource-initialization probes for v73 and v79 matched
+  the pre-contribution machine code when legacy compatibility was disabled.
+- Android/v79 DSP, ARM host and persistent agent builds passed. An Android/v73
+  DSP build also preserved the optional v2 import while the Linux compatibility
+  environment variable was set, confirming the Android build disables it.
+
+This run used an incremental image over the previously validated source-built
+TileLang/TVM image: changed Python, DSP headers and Docker scripts were replaced;
+the native compiler was reused. Each ARM host and DSP kernel was freshly built.
+These are correctness/build checks, not performance measurements or Android
+phone execution results.
