@@ -5,6 +5,7 @@ section type 0xd3574956, payload SWIV + IEEE CRC32 + two zero words.
 The CRC covers file bytes of each PT_LOAD, in program-header order.
 This adds integrity data; it does not disable the DSP loader's verification.
 """
+
 from pathlib import Path
 import hashlib
 import struct
@@ -34,14 +35,13 @@ def _crc(data, header):
             offset, size = segment[1], segment[4]
             if offset + size > len(data):
                 raise ValueError("ELF load segment exceeds file")
-            result = zlib.crc32(data[offset:offset + size], result)
+            result = zlib.crc32(data[offset : offset + size], result)
     return result
 
 
 def verify(data):
     header = _layout(data)
-    sections = [struct.unpack_from("<10I", data, header[6] + i * 40)
-                for i in range(header[12])]
+    sections = [struct.unpack_from("<10I", data, header[6] + i * 40) for i in range(header[12])]
     matches = [section for section in sections if section[1] == _CRC_SECTION]
     if len(matches) != 1:
         raise ValueError("Expected exactly one CRC section")
@@ -53,15 +53,14 @@ def verify(data):
     actual = _crc(data, header)
     if magic != 0x56495753 or reserved0 or reserved1 or expected != actual:
         raise ValueError(f"ELF CRC mismatch: stored={expected:08x}, actual={actual:08x}")
-    return {"crc32": f"{actual:08x}", "section_type": "0xd3574956",
-            "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+    return {"crc32": f"{actual:08x}", "section_type": "0xd3574956", "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
 
 
 def add_load_crc(path):
     path = Path(path)
     original = path.read_bytes()
     header = _layout(original)
-    old_sections = original[header[6]:header[6] + header[12] * 40]
+    old_sections = original[header[6] : header[6] + header[12] * 40]
     for i in range(header[12]):
         if struct.unpack_from("<I", old_sections, i * 40 + 4)[0] == _CRC_SECTION:
             return verify(original)

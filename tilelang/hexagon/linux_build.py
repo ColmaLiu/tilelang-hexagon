@@ -2,6 +2,7 @@
 
 No target program is run by this module. Android remains the default build path.
 """
+
 from __future__ import annotations
 
 import os
@@ -13,8 +14,7 @@ from pathlib import Path
 
 
 def _check(argv, *, cwd, env, verbose):
-    p = subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True,
-                       stdin=subprocess.DEVNULL, timeout=180)
+    p = subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=180)
     if verbose or p.returncode:
         print("[linux-host]", " ".join(map(str, argv)))
         print(p.stdout[-4000:])
@@ -36,25 +36,39 @@ def build_linux_host(project_dir, name, sdk, env, verbose=False):
     cc = shutil.which(os.environ.get("TILELANG_HEXAGON_LINUX_CC", "aarch64-linux-gnu-gcc"), path=env["PATH"])
     if not cc:
         raise RuntimeError("Linux ARM64 compiler not found")
-    includes = [out, sdk_root / "incs", sdk_root / "incs/stddef",
-                sdk_root / "utils/examples", sdk_root / "ipc/fastrpc/incs"]
+    includes = [out, sdk_root / "incs", sdk_root / "incs/stddef", sdk_root / "utils/examples", sdk_root / "ipc/fastrpc/incs"]
     inc_flags = ["-I" + str(p) for p in includes]
-    _check([sdk.qaic, "-mdll", "-o", str(out), *inc_flags, str(root / (name + ".idl"))],
-           cwd=root, env=env, verbose=verbose)
+    _check([sdk.qaic, "-mdll", "-o", str(out), *inc_flags, str(root / (name + ".idl"))], cwd=root, env=env, verbose=verbose)
     exe = out / (name + "_test")
-    sources = [out / (name + "_stub.c"), sdk_root / "utils/examples/dsp_capabilities_utils.c",
-               root / (name + "_host.c")]
-    command = [cc, "-std=gnu11", "-O2", "-fPIC", "-ffunction-sections", "-fdata-sections",
-               "-DVERIFY_PRINT_ERROR", *inc_flags, *map(str, sources),
-               "-Wl,--gc-sections", "-L" + str(runtime), "-Wl,-rpath-link," + str(runtime),
-               "-l:libcdsprpc.so", "-ldl", "-lpthread", "-o", str(exe)]
+    sources = [out / (name + "_stub.c"), sdk_root / "utils/examples/dsp_capabilities_utils.c", root / (name + "_host.c")]
+    command = [
+        cc,
+        "-std=gnu11",
+        "-O2",
+        "-fPIC",
+        "-ffunction-sections",
+        "-fdata-sections",
+        "-DVERIFY_PRINT_ERROR",
+        *inc_flags,
+        *map(str, sources),
+        "-Wl,--gc-sections",
+        "-L" + str(runtime),
+        "-Wl,-rpath-link," + str(runtime),
+        "-l:libcdsprpc.so",
+        "-ldl",
+        "-lpthread",
+        "-o",
+        str(exe),
+    ]
     _check(command, cwd=root, env=env, verbose=verbose)
     # Check the host ABI against supplied BSP libraries before deployment.
     readelf = shutil.which("aarch64-linux-gnu-readelf", path=env["PATH"])
     if not readelf:
         raise RuntimeError("aarch64-linux-gnu-readelf not found")
+
     def inspect(path, *flags):
         return _check([readelf, *flags, str(path)], cwd=root, env=env, verbose=False)
+
     header = inspect(exe, "-h")
     program = inspect(exe, "-l")
     if "AArch64" not in header or "/lib/ld-linux-aarch64.so.1" not in program:
