@@ -18,6 +18,28 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Some BSP loaders reject the SDK's optional weak v2 import. Opt in only for
+// firmware known to need the legacy API (validated on SA8650/v73). ISA version
+// alone says nothing about firmware API support. With -Bsymbolic this fallback
+// binds locally, so it must remain disabled for ordinary Android/Linux builds.
+#if defined(TL_HEXAGON_LEGACY_COMPUTE_RES) && TL_HEXAGON_LEGACY_COMPUTE_RES
+#include <string.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+int __attribute__((weak))
+compute_resource_attr_init_v2(compute_res_attr_t *attr, unsigned int size,
+                              unsigned int version) {
+  if (attr)
+    memset(attr, 0, size);
+  (void)version;
+  return -1;
+}
+#ifdef __cplusplus
+}
+#endif
+#endif
+
 #define TL_VTCM_INLINE static inline __attribute__((unused))
 
 static uint8_t *tl_vtcm_base_ptr;  // base of the acquired VTCM region
