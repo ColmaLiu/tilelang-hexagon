@@ -18,6 +18,7 @@ if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
 else
   docker run -d --name "$CONTAINER_NAME" --network=host \
     -e LOCAL_UID="$(id -u)" -e LOCAL_GID="$(id -g)" \
+    -e TMPDIR=/tmp \
     -e HEXAGON_DSP_ARCH="${HEXAGON_DSP_ARCH:-v73}" \
     -e TILELANG_HEXAGON_HLOS="${TILELANG_HEXAGON_HLOS:-linux}" \
     -e TILELANG_HEXAGON_DEVICE \
