@@ -306,8 +306,8 @@ TIR_DEFINE_TL_BUILTIN(ptx_cp_async)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-// Hexagon HMX instruction protocol.  State operands are dependency-only IR tokens
-// that make the implicit accumulator/convert/bias dependencies explicit.
+// Hexagon HMX instruction protocol.  State operands are dependency-only IR
+// tokens that make the implicit accumulator/convert/bias dependencies explicit.
 TIR_DEFINE_TL_BUILTIN(hexagon_hmx_acquire)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -329,7 +329,7 @@ TIR_DEFINE_TL_BUILTIN(hexagon_hmx_clear)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(hexagon_hmx_mma)
-    .set_num_inputs(3)
+    .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

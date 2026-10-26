@@ -41,7 +41,12 @@ def _run(argv: list[str], cwd: str, env: dict[str, str], verbose: bool) -> None:
     if verbose:
         print(f"[hexagon-build] $ {' '.join(argv)}  (cwd={cwd})")
     proc = subprocess.run(
-        argv, cwd=cwd, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        argv,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     )
     if verbose or proc.returncode != 0:
         print(proc.stdout[-4000:])
@@ -80,25 +85,47 @@ def build_cmake_fastrpc(
     """
     sdk = (sdk or HexagonSDK()).validate()
     dsp_arch = dsp_arch or sdk.dsp_arch
+    hlos = os.environ.get("TILELANG_HEXAGON_HLOS", "android")
+    if hlos not in {"android", "linux"}:
+        raise HexagonBuildError(f"Unsupported HLOS: {hlos}")
+    if hlos == "linux":
+        from .linux_runtime import build_linux_fastrpc
+
+        return build_linux_fastrpc(project_dir, name, sdk, dsp_arch, build_host, verbose)
     env = sdk.environ
     build_cmake = sdk.build_cmake
 
-    _run([build_cmake, "hexagon", f"DSP_ARCH={dsp_arch}"], cwd=project_dir, env=env, verbose=verbose)
+    # Never inherit a Linux BSP compatibility setting from a reused CMake tree.
+    _run([build_cmake, "hexagon", f"DSP_ARCH={dsp_arch}", "TL_HEXAGON_LEGACY_COMPUTE_RES=OFF"], cwd=project_dir, env=env, verbose=verbose)
     if build_host:
         _run([build_cmake, "android"], cwd=project_dir, env=env, verbose=verbose)
 
-    skel = _find_one([
-        os.path.join(project_dir, f"hexagon_*_{dsp_arch}", "**", f"lib{name}_skel.so"),
-        os.path.join(project_dir, f"hexagon_*_{dsp_arch}", f"lib{name}_skel.so"),
-    ])
-    host = _find_one([
-        os.path.join(project_dir, "android_*_aarch64", "**", f"{name}_test"),
-        os.path.join(project_dir, "android_*_aarch64", f"{name}_test"),
-    ]) if build_host else ""
-    agent = _find_one([
-        os.path.join(project_dir, "android_*_aarch64", "**", f"{name}_agent"),
-        os.path.join(project_dir, "android_*_aarch64", f"{name}_agent"),
-    ]) if build_host else ""
+    skel = _find_one(
+        [
+            os.path.join(project_dir, f"hexagon_*_{dsp_arch}", "**", f"lib{name}_skel.so"),
+            os.path.join(project_dir, f"hexagon_*_{dsp_arch}", f"lib{name}_skel.so"),
+        ]
+    )
+    host = (
+        _find_one(
+            [
+                os.path.join(project_dir, "android_*_aarch64", "**", f"{name}_test"),
+                os.path.join(project_dir, "android_*_aarch64", f"{name}_test"),
+            ]
+        )
+        if build_host
+        else ""
+    )
+    agent = (
+        _find_one(
+            [
+                os.path.join(project_dir, "android_*_aarch64", "**", f"{name}_agent"),
+                os.path.join(project_dir, "android_*_aarch64", f"{name}_agent"),
+            ]
+        )
+        if build_host
+        else ""
+    )
 
     if not skel:
         raise HexagonBuildError(f"DSP skel lib{name}_skel.so not found after build in {project_dir}")

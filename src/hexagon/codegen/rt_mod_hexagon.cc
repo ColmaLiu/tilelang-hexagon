@@ -36,10 +36,9 @@ Module BuildTileLangHexagon(IRModule mod, Target target) {
   }
 
   // Deterministic emission order for stable output.
-  std::sort(funcs.begin(), funcs.end(),
-            [](const auto &a, const auto &b) {
-              return a.first->name_hint < b.first->name_hint;
-            });
+  std::sort(funcs.begin(), funcs.end(), [](const auto &a, const auto &b) {
+    return a.first->name_hint < b.first->name_hint;
+  });
 
   for (const auto &[gvar, prim_func] : funcs) {
     cg.AddFunction(prim_func);

@@ -21,9 +21,10 @@ using half = __fp16;
 // the host's run() raises instead of silently returning unwritten/partial
 // output.  The codegen emits these codes into the kernel/worker source.
 #define TL_OK 0
-#define TL_ERR_VTCM 1 // VTCM region unavailable / no worker region fits the grant
-#define TL_ERR_HMX 2  // HMX could not be enabled for a worker thread
-#define TL_ERR_DMA 3  // User-DMA submission or completion failed
+#define TL_ERR_VTCM                                                            \
+  1 // VTCM region unavailable / no worker region fits the grant
+#define TL_ERR_HMX 2 // HMX could not be enabled for a worker thread
+#define TL_ERR_DMA 3 // User-DMA submission or completion failed
 
 #ifndef TL_DEVICE
 #define TL_DEVICE static inline __attribute__((always_inline))
@@ -44,6 +45,14 @@ template <typename T, int N> struct vec_type {
   typedef T nat_t __attribute__((ext_vector_type(N)));
   nat_t v __attribute__((aligned(1)));
   vec_type() = default;
+  // Express copies as native vector loads/stores. The implicit aggregate copy
+  // becomes llvm.memcpy (and an out-of-line 128-byte memcpy on Hexagon), even
+  // for a full-register T.copy between VTCM and DDR.
+  vec_type(const vec_type &o) : v(o.v) {}
+  vec_type &operator=(const vec_type &o) {
+    v = o.v;
+    return *this;
+  }
   vec_type(nat_t n) : v(n) {} // wrap a native result (operator returns / loads)
   // Broadcast ctor.  const-ref because __fp16 is not a valid by-value parameter
   // type on Hexagon.  `(nat_t)scalar` is clang's ext_vector splat.
@@ -53,24 +62,32 @@ template <typename T, int N> struct vec_type {
   template <typename U> explicit vec_type(const vec_type<U, N> &o) {
     v = __builtin_convertvector(o.v, nat_t);
   }
-  // Element-wise operators -> native (HVX) vector ops.  Members are instantiated
-  // lazily, so bit-ops on float aggregates (never emitted) never get type-checked.
-#define TL_VEC_BINOP(op)                                                        \
+  // Element-wise operators -> native (HVX) vector ops.  Members are
+  // instantiated lazily, so bit-ops on float aggregates (never emitted) never
+  // get type-checked.
+#define TL_VEC_BINOP(op)                                                       \
   vec_type operator op(const vec_type &o) const { return vec_type(v op o.v); }
-  TL_VEC_BINOP(+) TL_VEC_BINOP(-) TL_VEC_BINOP(*) TL_VEC_BINOP(/)
-  TL_VEC_BINOP(&) TL_VEC_BINOP(|) TL_VEC_BINOP(^) TL_VEC_BINOP(<<) TL_VEC_BINOP(>>)
+  TL_VEC_BINOP(+)
+  TL_VEC_BINOP(-)
+  TL_VEC_BINOP(*)
+  TL_VEC_BINOP(/)
+  TL_VEC_BINOP(&)
+  TL_VEC_BINOP(|)
+  TL_VEC_BINOP(^)
+  TL_VEC_BINOP(<<)
+  TL_VEC_BINOP(>>)
 #undef TL_VEC_BINOP
 };
 
 // Widths up to 128 lanes: HVX is a 1024-bit vector, so one register holds 128
 // int8 / 64 fp16 / 32 fp32.  The codegen's Hexagon vectorizer plans up to that.
-#define TL_DEFINE_VEC(T)                                                        \
-  using T##2 = vec_type<T, 2>;                                                  \
-  using T##4 = vec_type<T, 4>;                                                  \
-  using T##8 = vec_type<T, 8>;                                                  \
-  using T##16 = vec_type<T, 16>;                                                \
-  using T##32 = vec_type<T, 32>;                                                \
-  using T##64 = vec_type<T, 64>;                                                \
+#define TL_DEFINE_VEC(T)                                                       \
+  using T##2 = vec_type<T, 2>;                                                 \
+  using T##4 = vec_type<T, 4>;                                                 \
+  using T##8 = vec_type<T, 8>;                                                 \
+  using T##16 = vec_type<T, 16>;                                               \
+  using T##32 = vec_type<T, 32>;                                               \
+  using T##64 = vec_type<T, 64>;                                               \
   using T##128 = vec_type<T, 128>;
 
 TL_DEFINE_VEC(float)

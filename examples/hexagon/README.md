@@ -8,6 +8,7 @@ for how the adaptation works.
 
 | Example | Shows |
 |---|---|
+| `example_demo_ops.py` | Five DSL operator implementations |
 | `benchmark_dma_matmul.py` | DSP-timed serial vs output-block prefetch, entirely DSL DMA/copy/HMX scheduling |
 | `example_dma_hmx_matmul.py` | DSL output-block DMA prefetch + Crouton packing + HMX matmul |
 | `example_matmul.py` | tiled `T.gemm` → the HMX matrix engine |
@@ -100,9 +101,11 @@ worker pool fans the grid across the 6 HW threads with the 1 HMX serialized.)
   Submitting to a full queue reports an error instead of silently waiting.
   Static, in-bounds 1D/2D row-major DDR ↔ VTCM regions are supported. Crouton
   conversion remains a separate `T.copy`; unsupported async regions fail lowering.
-  Use a manual `T.serial` schedule: worker pools, automatic `T.Pipelined`, and mixing
-  the managed queue with raw DMA calls are unsupported. The caller must exclusively
-  own DMA0. Managed async kernels conservatively disable automatic VTCM allocation
+  Use a manual `T.serial` schedule. `num_workers` uses worker-local queue and VTCM
+  state, with submission and completion on the same QuRT thread; automatic
+  `T.Pipelined` and mixing managed queues with raw/external DMA remain unsupported.
+  This does not imply a separate physical DMA engine per worker. Managed async
+  kernels conservatively disable automatic VTCM allocation
   reuse; explicit ping/pong still works. Their generated DSP project uses
   `-fno-exceptions` for scope-based error cleanup.
   `example_dma_hmx_matmul.py` demonstrates output-block prefetch (BK=K):
@@ -112,8 +115,8 @@ worker pool fans the grid across the 6 HW threads with the 1 HMX serialized.)
 - **The DMA primitive layer includes caller-owned linked descriptor queues and
   1D/2D submission primitives.** These remain available for backend integration;
   `T.copy` has no DMA-specific lowering. Native Crouton endpoints use the HMX
-  pack/unpack path. DMA inside `num_workers` is rejected until engine ownership
-  and queue state are worker-local.
+  pack/unpack path. See the [DMA/worker implementation boundaries](../../docs/hexagon_dsl_demo_ops_zh.md#实现边界)
+  for the currently validated composition and cleanup rules.
 - The flash-attention softmax runs on **HVX**: the elementwise `T.serial` maps
   (`exp`, rescale, `/l`) are vectorized to 64-lane HVX by the Hexagon codegen, and the
   row reductions go through the reduce tile op (`hexreduce`). It's spelled with explicit

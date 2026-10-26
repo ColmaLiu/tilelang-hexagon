@@ -138,9 +138,7 @@ def make(M, N, K, input_dtype="float16", output_dtype="float16"):
                                     packed_lane = lane_group * 32 + lane
                                     m = mt * 32 + 2 * mpair + packed_lane % 2
                                     n = packed_lane // 2
-                                    C[m, nt * 32 + n] = C_hmx[
-                                        2 * mpair + packed_lane % 2, n
-                                    ]
+                                    C[m, nt * 32 + n] = C_hmx[2 * mpair + packed_lane % 2, n]
 
             E.release(acc)
 
@@ -220,7 +218,7 @@ def make_staged_hmx(M, N, K):
 
     if M <= 0 or M % 32 or N <= 0 or N % 32 or K <= 0 or K % 32:
         raise ValueError("staged HMX requires positive M/N/K multiples of 32")
-    MT, NT, KT = M // 32, N // 32, K // 32
+    MT, NT = M // 32, N // 32
     E = HMXIntrinEmitter(M, N, K)
     Q = Q4HMXIntrinEmitter()
     dst_stride = T.symbolic("dst_stride", dtype=T.int32)
@@ -297,13 +295,8 @@ def make_dequant_tile(output_dtype="float32"):
             q4_values = T.alloc_local((64,), "float16")
             T.annotate_layout({B_hmx: E.weight_layout(B_hmx)})
             for n in T.vectorized(32):
-                scale_bits = T.Cast(
-                    "uint16", W[0, 0, Q4_QUANT_BYTES + 2 * n]
-                ) | (
-                    T.Cast(
-                        "uint16", W[0, 0, Q4_QUANT_BYTES + 2 * n + 1]
-                    )
-                    << 8
+                scale_bits = T.Cast("uint16", W[0, 0, Q4_QUANT_BYTES + 2 * n]) | (
+                    T.Cast("uint16", W[0, 0, Q4_QUANT_BYTES + 2 * n + 1]) << 8
                 )
                 q4_scales[n] = T.reinterpret(scale_bits, T.float16)
             for kpair in T.serial(16):
@@ -313,9 +306,7 @@ def make_dequant_tile(output_dtype="float32"):
                     q4_low[n] = T.Cast("float16", low) * q4_scales[n]
                 for n in T.vectorized(32):
                     packed = T.Cast("uint16", W[0, 0, kpair * 32 + n])
-                    high = T.Cast("int16", (packed >> 4) & 15) - T.Cast(
-                        "int16", 8
-                    )
+                    high = T.Cast("int16", (packed >> 4) & 15) - T.Cast("int16", 8)
                     q4_high[n] = T.Cast("float16", high) * q4_scales[n]
                 for n in T.vectorized(32):
                     q4_values[2 * n] = q4_low[n]
@@ -342,12 +333,8 @@ def pack_q4_tiles(nibbles: np.ndarray, scales: np.ndarray) -> np.ndarray:
         for kt in range(KT):
             q = nibbles[nt * 32 : (nt + 1) * 32, kt * 32 : (kt + 1) * 32]
             for kp in range(16):
-                packed[nt, kt, kp * 32 : (kp + 1) * 32] = q[:, 2 * kp] | (
-                    q[:, 2 * kp + 1] << 4
-                )
-            packed[nt, kt, Q4_QUANT_BYTES:Q4_TILE_BYTES] = np.ascontiguousarray(
-                scales[nt * 32 : (nt + 1) * 32, kt]
-            ).view(np.uint8)
+                packed[nt, kt, kp * 32 : (kp + 1) * 32] = q[:, 2 * kp] | (q[:, 2 * kp + 1] << 4)
+            packed[nt, kt, Q4_QUANT_BYTES:Q4_TILE_BYTES] = np.ascontiguousarray(scales[nt * 32 : (nt + 1) * 32, kt]).view(np.uint8)
     return packed
 
 
@@ -356,19 +343,14 @@ def main():
     parser.add_argument("--m", type=int, default=32)
     parser.add_argument("--n", type=int, default=128)
     parser.add_argument("--k", type=int, default=512)
-    parser.add_argument(
-        "--io-dtype", choices=("float16", "float32"), default="float32"
-    )
+    parser.add_argument("--io-dtype", choices=("float16", "float32"), default="float32")
     args = parser.parse_args()
     M, N, K = args.m, args.n, args.k
 
     rng = np.random.default_rng(0)
     nibbles = rng.integers(0, 16, size=(N, K), dtype=np.uint8)
     scales = (rng.standard_normal((N, K // 32)) * 0.05).astype(np.float16)
-    weights = (
-        (nibbles.astype(np.float32) - 8.0)
-        * np.repeat(scales.astype(np.float32), 32, axis=1)
-    ).astype(np.float16)
+    weights = ((nibbles.astype(np.float32) - 8.0) * np.repeat(scales.astype(np.float32), 32, axis=1)).astype(np.float16)
     packed = pack_q4_tiles(nibbles, scales)
     numpy_io_dtype = np.float16 if args.io_dtype == "float16" else np.float32
     activation = (rng.standard_normal((M, K)) * 0.1).astype(numpy_io_dtype)
@@ -383,10 +365,7 @@ def main():
     output = kernel(torch.from_numpy(activation), torch.from_numpy(packed))
     output = output.cpu().numpy().astype(np.float32)
     rel = np.abs(output - reference).max() / (np.abs(reference).max() + 1e-6)
-    print(
-        f"HMX atom q4_0 matmul {M}x{N}x{K}: rel err = {rel:.4g} "
-        f"({'PASS' if rel < 5e-2 else 'FAIL'})"
-    )
+    print(f"HMX atom q4_0 matmul {M}x{N}x{K}: rel err = {rel:.4g} ({'PASS' if rel < 5e-2 else 'FAIL'})")
 
 
 if __name__ == "__main__":

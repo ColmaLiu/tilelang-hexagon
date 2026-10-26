@@ -45,10 +45,7 @@ def _validate_matrix_shape(shape: tuple, name: str) -> tuple[int, int]:
     rows = _static_extent(shape[-2], f"{name} rows")
     cols = _static_extent(shape[-1], f"{name} columns")
     if rows <= 0 or cols <= 0 or rows % TILE or cols % TILE:
-        raise ValueError(
-            f"HMX {name} dimensions must be positive multiples of {TILE}; "
-            f"got ({rows}, {cols})"
-        )
+        raise ValueError(f"HMX {name} dimensions must be positive multiples of {TILE}; got ({rows}, {cols})")
     for i, extent in enumerate(shape[:-2]):
         _static_extent(extent, f"{name} prefix dimension {i}")
     return rows, cols
@@ -63,9 +60,7 @@ def make_hmx_crouton_layout() -> T.Layout:
     )
 
 
-def _expand_matrix_layout(
-    shape: tuple, tile_order: tuple[int, int], name: str
-) -> T.Layout:
+def _expand_matrix_layout(shape: tuple, tile_order: tuple[int, int], name: str) -> T.Layout:
     rows, cols = _validate_matrix_shape(shape, name)
     factors = (rows // TILE, cols // TILE)
     layout = make_hmx_crouton_layout()
@@ -123,10 +118,7 @@ def _buffer_prefix(buffer, prefix, name: str) -> tuple:
     rank = len(getattr(buffer, "shape", ()))
     expected = max(rank - 2, 0)
     if len(prefix) != expected:
-        raise ValueError(
-            f"HMX {name} expects {expected} prefix indices for a rank-{rank} buffer; "
-            f"got {len(prefix)}"
-        )
+        raise ValueError(f"HMX {name} expects {expected} prefix indices for a rank-{rank} buffer; got {len(prefix)}")
     return prefix
 
 
@@ -241,11 +233,12 @@ class HMXIntrinEmitter:
         k_inner=0,
         a_prefix=(),
         b_prefix=(),
+        num_tiles=1,
     ):
-        """Emit one HMX MAC atom for output tile ``(inst_m_idx, inst_n_idx)``.
+        """Emit one HMX packet reducing 1..32 contiguous K tiles for an output tile.
 
         ``a_prefix`` and ``b_prefix`` address independent staged matrices.  The
-        The final dimensions follow the operand's logical storage shape
+        final dimensions follow the operand's logical storage shape
         (``[M,K]``/``[K,N]`` or their transposes) and are rewritten by
         ``T.Layout`` to the same native mathematical Crouton tiles.
         """
@@ -253,6 +246,11 @@ class HMXIntrinEmitter:
         _validate_atom_index(inst_m_idx, self.MT, "inst_m_idx")
         _validate_atom_index(inst_n_idx, self.NT, "inst_n_idx")
         _validate_atom_index(k_inner, self.KT, "k_inner")
+        if isinstance(num_tiles, int):
+            if not 1 <= num_tiles <= 32:
+                raise ValueError("HMX deep num_tiles must be in [1, 32]")
+            if isinstance(k_inner, int) and k_inner + num_tiles > self.KT:
+                raise ValueError("HMX deep packet exceeds operand K tiles")
         a_prefix = _buffer_prefix(activation, a_prefix, "activation")
         b_prefix = _buffer_prefix(weight, b_prefix, "weight")
         if self.a_transposed:
@@ -268,8 +266,9 @@ class HMXIntrinEmitter:
         def _mma(acc_state, activation, weight):
             T.hexagon_hmx_mma(
                 T.access_ptr(acc_state[0], "rw"),
-                T.access_ptr(activation[a_index], "r", TILE_ELEMS),
-                T.access_ptr(weight[b_index], "r", TILE_ELEMS),
+                T.access_ptr(activation[a_index], "r", num_tiles * TILE_ELEMS),
+                T.access_ptr(weight[b_index], "r", num_tiles * TILE_ELEMS),
+                num_tiles,
             )
 
         return _mma(acc_state, activation, weight)
@@ -284,7 +283,11 @@ class HMXIntrinEmitter:
         a_prefix=(),
         b_prefix=(),
     ):
-        """Reduce all K atoms for one output tile into the implicit accumulator."""
+        """Reduce one output tile with caller-side chunks of at most 32 K tiles.
+
+        Each chunk issues one deep packet; the final packet reads only the
+        remaining tiles. Native operand layouts keep K tiles contiguous.
+        """
 
         _validate_atom_index(inst_m_idx, self.MT, "inst_m_idx")
         _validate_atom_index(inst_n_idx, self.NT, "inst_n_idx")
@@ -293,16 +296,17 @@ class HMXIntrinEmitter:
 
         @T.macro
         def _mma(acc_state, activation, weight):
-            for k_inner in T.serial(self.KT):
+            for k_chunk in T.serial(T.ceildiv(self.KT, 32)):
                 self.mma_atom(
                     acc_state,
                     activation,
                     weight,
                     inst_m_idx,
                     inst_n_idx,
-                    k_inner,
+                    k_chunk * 32,
                     a_prefix,
                     b_prefix,
+                    T.min(self.KT - k_chunk * 32, 32),
                 )
 
         return _mma(acc_state, activation, weight)

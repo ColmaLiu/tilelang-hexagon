@@ -97,11 +97,33 @@ monolithic `tl_hexagon_hmx_gemm` template. Kernels may use one logical `T.copy` 
 strided DDR matrix region directly to/from an inferred HMX layout; the lowering passes the
 row-major base/stride to
 `tl_hexagon_hmx_pack_crouton`/`unpack_crouton`; normal 64-wide forms use HVX
-`vshuff`/`vdeal`, while transposed and remainder forms remain scalar. DMA is a separate row-major DDR↔VTCM operation and does not perform the Crouton
+`vshuff`/`vdeal`. Contiguous aligned W[N,K] with K divisible by 64 uses a
+32x64 register-shuffle transpose; other transposed/remainder forms retain the
+scalar fallback. Activation/output Crouton copies also support FP32 row-major
+endpoints, fusing FP32↔FP16 conversion with the layout change.
+
+`T.copy(..., annotations={"hexagon.copy_workers": 6})` partitions a complete
+activation/output or transposed-weight layout copy into disjoint native tiles
+using TileLang's persistent pool. It returns after all tiles complete, uses no
+private allocation, and can overlap the caller's DMA of a different input slot.
+This annotation cannot nest inside a `num_workers` kernel. The operator still
+expresses its A/W/C lifetimes and HMX schedule in DSL.
+
+DMA is a separate row-major DDR↔VTCM operation and does not perform the Crouton
 permutation. `dma.h` exposes raw instructions, descriptor builders, synchronous
 copy helpers, and a caller-owned linked queue through explicit extern calls;
-`T.dma_copy` / `T.dma_wait` expose a managed per-kernel FIFO for explicit
-manual DMA schedules. `T.copy` has no DMA-specific lowering. The native-layout
+`T.dma_copy` / `T.dma_wait` expose a managed per-callback FIFO for explicit
+manual DMA schedules. With `T.Kernel(num_workers=...)`, every worker owns its
+descriptors and private VTCM slice and drains the FIFO before returning,
+including error cleanup. A worker must issue and complete its own queue on the
+same QuRT thread; managed and raw/foreign DMA may not be mixed. Concurrent DDR
+stores must own disjoint cache lines, including the lines around partial rows.
+Scalar/vector producers are published before DMA reads, and DMA stores finish
+cache maintenance before completion. Small source flushes use `dccleana` plus
+`syncht`, preserving the QuRT flush semantics. This path is device-tested on v79;
+it does not imply independent physical engines or arbitrary nested dispatch.
+Compiler-managed `T.Pipelined` is still unsupported; the examples use explicit
+double buffering. `T.copy` has no DMA-specific lowering. The native-layout
 `T.gemm` path is device-validated on v79: a staged
 32x128x128 q4 case has relative error 0.000351 and the fused-copy 256x256x256 FP16 path has
 maximum absolute error 0.0009766.

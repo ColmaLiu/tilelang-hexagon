@@ -52,9 +52,7 @@ def emit(M: int, N: int, K: int, output_dir: Path) -> tuple[Path, Path]:
     kernel_source = str(artifact.kernel_source)
 
     entry_match = re.search(r"(int32_t\s+\w+\([^)]*\))", kernel_source)
-    high_water_match = re.search(
-        r"tl_vtcm_shared_high_water\s*=\s*(\d+)u", kernel_source
-    )
+    high_water_match = re.search(r"tl_vtcm_shared_high_water\s*=\s*(\d+)u", kernel_source)
     if entry_match is None or high_water_match is None:
         raise RuntimeError("generated source is missing its entry or VTCM contract")
 
@@ -62,8 +60,7 @@ def emit(M: int, N: int, K: int, output_dir: Path) -> tuple[Path, Path]:
     high_water = int(high_water_match.group(1))
     embedded_symbol = f"{symbol}_embedded"
     embedded_entry = (
-        f"int32_t {embedded_symbol}(void* vtcm_base, unsigned int vtcm_size, "
-        "float* activation, uint8_t* weight, float* output)"
+        f"int32_t {embedded_symbol}(void* vtcm_base, unsigned int vtcm_size, float* activation, uint8_t* weight, float* output)"
     )
     source = (
         "// Generated TileLang kernel plus its same-TU llama.cpp runtime bridge.\n"
@@ -71,7 +68,7 @@ def emit(M: int, N: int, K: int, output_dir: Path) -> tuple[Path, Path]:
         "#define TL_Q4_0_PADDED_VTCM_INPUT 1\n"
         "#include <tl_templates/hexagon/qmatmul.h>\n\n"
         f"{kernel_source}\n"
-        "#ifdef __cplusplus\nextern \"C\"\n#endif\n"
+        '#ifdef __cplusplus\nextern "C"\n#endif\n'
         f"{embedded_entry} {{\n"
         "  if (tl_bridge_enter(vtcm_base, vtcm_size) != 0) return -1;\n"
         f"  int32_t rc = {symbol}_kernel(activation, weight, output);\n"
@@ -111,9 +108,7 @@ def emit(M: int, N: int, K: int, output_dir: Path) -> tuple[Path, Path]:
             "weight_padding": "128B-aligned VTCM stage keeps 64B readable past final scale tail",
             "activation": f"contiguous [{M}][{K}] float32",
             "output": f"contiguous [{M}][{N}] float32",
-            "call": (
-                f"{embedded_symbol}(vtcm_base, vtcm_size, activation, weight, output)"
-            ),
+            "call": (f"{embedded_symbol}(vtcm_base, vtcm_size, activation, weight, output)"),
         },
         "lowering_contract": {
             "q4_atom": "tl_hexagon_q4_0_dequant_tile_32x32",

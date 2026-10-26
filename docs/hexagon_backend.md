@@ -200,11 +200,10 @@ native Crouton VTCM offsets, and explicit HMX atoms.
   with non-alphabetical param names + non-square shapes, or symmetry hides the bug.*
 
 - **VTCM is one arena; partition it carefully.** Codegen bump-allocates `alloc_shared`
-  bottom-up and *publishes a high-water mark* (`tl_vtcm_shared_high_water`) so the
-  HMX gemm's top-down Crouton scratch can't overlap the live tiles. Under the worker
-  pool, VTCM is **partitioned per worker** (`base + wid*stride`), and a gemm-in-worker
-  carves its scratch from the worker's slice (`region_end`/`op_floor`), not the global
-  top.
+  bottom-up and publishes `tl_vtcm_shared_high_water` for embedding/export capacity
+  checks. Under the worker pool, VTCM is partitioned per worker (`base + wid*stride`).
+  HMX atoms and Crouton copies use explicit shared buffers; there is no hidden
+  top-down GEMM scratch allocation.
 
 - **The worker pool = 1 HMX + 6 HVX.** The producer/consumer model: the 6 HVX units
   run pack/unpack/softmax/copies in parallel; the 1 HMX MAC is serialized by a
@@ -278,9 +277,10 @@ compares serial and prefetch versions using DSP-local SDK timing; neither file
 imports a handwritten C/C++ compute or DMA scheduling kernel.
 
 **Optional, not yet done:** autotune (`num_workers` + tile sizes as knobs);
-DMA engine ownership integration with worker pools; automatic software-pipeline
-DMA lowering; and schedules for blocks larger than VTCM. Explicit DSL DMA
-submission/wait and DSP timing are available in the examples above.
+automatic software-pipeline DMA lowering; and schedules for blocks larger than VTCM.
+Worker-local managed DMA and synchronous parallel layout copies are now supported
+within the [validated implementation boundaries](hexagon_dsl_demo_ops_zh.md#实现边界).
+Explicit DMA prefetch alone does not establish cross-stage HMX/HVX overlap.
 
 ---
 
@@ -294,3 +294,13 @@ direct-FastRPC runtime**. The result: the same `T.gemm` the user would write for
 runs idiomatically on the HMX matrix engine, composes into flash attention, and
 parallelizes across the 6 HW threads with the 1 HMX serialized — all validated on real
 hardware.
+
+### HMX K-tile packets
+
+`HMXIntrinEmitter.mma_tile()` reduces K for one output tile in DSL chunks of
+at most 32 contiguous native tiles. Each `hexagon_hmx_mma` intrinsic carries
+an explicit tile count and matching operand read extents; `tl_hmx_mac_tiles`
+emits one `:deep` packet and requires `1 <= n <= 32`. The caller handles the
+final partial chunk. `mma_atom()` and `T.hexagon_hmx_mma()` default to one tile
+for existing explicit schedules. Accumulator acquisition, clear, conversion,
+and output storage remain separate operations.

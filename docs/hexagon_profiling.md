@@ -122,8 +122,8 @@ we'd add an HMX event to `opt_pmu_evt`.
 
 We deployed itrace's full runtime to the device (all prebuilt for our exact target:
 `android_aarch64` host libs + `hexagon_toolv19_v79` DSP skel + libperfetto/libprotobuf) and
-drove it via the **zero-recompile automated constructor** (`LD_PRELOAD=libitrace_constructor.so`
-+ `itrace_config.txt`). It got most of the way: loaded, parsed the config, and **identified
+drove it via the **zero-recompile automated constructor** (`LD_PRELOAD=libitrace_constructor.so` +
+`itrace_config.txt`). It got most of the way: loaded, parsed the config, and **identified
 every event** (`HVX_ACTIVE=0x80cc`, `COMMITTED_PKT_ANY`, `AXI_*`) on the CDSP domain — then
 **null-deref SIGSEGV** (`fault addr 0x0`) at the first setup action *after* config parse,
 because the constructor runs at **library-load time (before `main`)**, before the process's

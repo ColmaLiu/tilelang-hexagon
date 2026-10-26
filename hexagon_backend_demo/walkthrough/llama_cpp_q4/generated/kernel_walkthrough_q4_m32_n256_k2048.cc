@@ -9,7 +9,9 @@
 #ifdef __cplusplus
 extern "C"
 #endif
-int32_t tl_walkthrough_q4_m32_n256_k2048_pack_kernel(float* activation, half* activation_hmx, uint32_t* bias_vtcm) {
+    int32_t tl_walkthrough_q4_m32_n256_k2048_pack_kernel(float *activation,
+                                                         half *activation_hmx,
+                                                         uint32_t *bias_vtcm) {
   int bx = 0;
   for (bx = 0; bx < 1; ++bx) {
     int tx = 0;
@@ -24,7 +26,10 @@ int32_t tl_walkthrough_q4_m32_n256_k2048_pack_kernel(float* activation, half* ac
           }
           for (int32_t kt = 0; kt < 64; ++kt) {
             for (int32_t row_pair = 0; row_pair < 16; ++row_pair) {
-              tl_hexagon_hmx_pack_a_f32_pair_k32((&(activation_hmx[((kt * 1024) + (row_pair * 64))])), (&(activation[((row_pair * 4096) + (kt * 32))])), (&(activation[(((row_pair * 4096) + (kt * 32)) + 2048)])));
+              tl_hexagon_hmx_pack_a_f32_pair_k32(
+                  (&(activation_hmx[((kt * 1024) + (row_pair * 64))])),
+                  (&(activation[((row_pair * 4096) + (kt * 32))])),
+                  (&(activation[(((row_pair * 4096) + (kt * 32)) + 2048)])));
             }
           }
         }
@@ -34,14 +39,15 @@ int32_t tl_walkthrough_q4_m32_n256_k2048_pack_kernel(float* activation, half* ac
   return TL_OK;
 }
 
-
 // tilelang Hexagon (cDSP) kernel
 #include <tl_templates/hexagon/common.h>
 
 #ifdef __cplusplus
 extern "C"
 #endif
-int32_t tl_walkthrough_q4_m32_n256_k2048_dequant_kernel(uint8_t* staged_weight, half* weight_hmx, int32_t tile_begin, int32_t tile_end) {
+    int32_t tl_walkthrough_q4_m32_n256_k2048_dequant_kernel(
+        uint8_t *staged_weight, half *weight_hmx, int32_t tile_begin,
+        int32_t tile_end) {
   int bx = 0;
   for (bx = 0; bx < 1; ++bx) {
     int tx = 0;
@@ -53,7 +59,9 @@ int32_t tl_walkthrough_q4_m32_n256_k2048_dequant_kernel(uint8_t* staged_weight, 
           for (int32_t tile = tile_begin; tile < tile_end; ++tile) {
             if (0 <= tile) {
               if (tile < 512) {
-                tl_hexagon_q4_0_dequant_tile_32x32((&(weight_hmx[(((int64_t)tile) * (int64_t)1024)])), (&(staged_weight[(((int64_t)tile) * (int64_t)640)])));
+                tl_hexagon_q4_0_dequant_tile_32x32(
+                    (&(weight_hmx[(((int64_t)tile) * (int64_t)1024)])),
+                    (&(staged_weight[(((int64_t)tile) * (int64_t)640)])));
               }
             }
           }
@@ -64,14 +72,15 @@ int32_t tl_walkthrough_q4_m32_n256_k2048_dequant_kernel(uint8_t* staged_weight, 
   return TL_OK;
 }
 
-
 // tilelang Hexagon (cDSP) kernel
 #include <tl_templates/hexagon/common.h>
 
 #ifdef __cplusplus
 extern "C"
 #endif
-int32_t tl_walkthrough_q4_m32_n256_k2048_compute_kernel(half* activation_hmx, half* weight_hmx, uint32_t* bias_vtcm, half* output_hmx, float* output, int32_t dst_stride) {
+    int32_t tl_walkthrough_q4_m32_n256_k2048_compute_kernel(
+        half *activation_hmx, half *weight_hmx, uint32_t *bias_vtcm,
+        half *output_hmx, float *output, int32_t dst_stride) {
   int bx = 0;
   for (bx = 0; bx < 1; ++bx) {
     uint8_t acc[1];
@@ -88,13 +97,26 @@ int32_t tl_walkthrough_q4_m32_n256_k2048_compute_kernel(half* activation_hmx, ha
             tl_hexagon_hmx_clear_acc((&(acc[0])));
             tl_hexagon_hmx_load_bias((&(bias[0])), (&(bias_vtcm[0])));
             for (int32_t kt = 0; kt < 64; ++kt) {
-              tl_hexagon_hmx_mma_atom((&(acc[0])), (&(activation_hmx[(kt * 1024)])), (&(weight_hmx[((nt * 65536) + (kt * 1024))])));
+              tl_hexagon_hmx_mma_atom(
+                  (&(acc[0])), (&(activation_hmx[(kt * 1024)])),
+                  (&(weight_hmx[((nt * 65536) + (kt * 1024))])));
             }
-            tl_hexagon_hmx_convert_acc((&(cvt[0])), (&(acc[0])), (&(bias[0])), (&(bias_vtcm[0])), 2);
-            tl_hexagon_hmx_store_cvt_state((&(cvt[0])), (&(output_hmx[0])), (&(acc[0])), (&(bias[0])), (&(bias_vtcm[0])), (&(activation_hmx[0])), (&(weight_hmx[0])));
+            tl_hexagon_hmx_convert_acc((&(cvt[0])), (&(acc[0])), (&(bias[0])),
+                                       (&(bias_vtcm[0])), 2);
+            tl_hexagon_hmx_store_cvt_state(
+                (&(cvt[0])), (&(output_hmx[0])), (&(acc[0])), (&(bias[0])),
+                (&(bias_vtcm[0])), (&(activation_hmx[0])), (&(weight_hmx[0])));
             if ((nt * 32) < dst_stride) {
               for (int32_t row_pair = 0; row_pair < 16; ++row_pair) {
-                tl_hexagon_hmx_unpack_c_f32_pair_n32((&(output[((((int64_t)nt) * (int64_t)32) + ((((int64_t)row_pair) * ((int64_t)dst_stride)) * (int64_t)2))])), (&(output[((((int64_t)nt) * (int64_t)32) + (((((int64_t)row_pair) * (int64_t)2) + (int64_t)1) * ((int64_t)dst_stride)))])), (&(output_hmx[(row_pair * 64)])));
+                tl_hexagon_hmx_unpack_c_f32_pair_n32(
+                    (&(output[((((int64_t)nt) * (int64_t)32) +
+                               ((((int64_t)row_pair) * ((int64_t)dst_stride)) *
+                                (int64_t)2))])),
+                    (&(output[(
+                        (((int64_t)nt) * (int64_t)32) +
+                        (((((int64_t)row_pair) * (int64_t)2) + (int64_t)1) *
+                         ((int64_t)dst_stride)))])),
+                    (&(output_hmx[(row_pair * 64)])));
               }
             }
           }
@@ -105,4 +127,3 @@ int32_t tl_walkthrough_q4_m32_n256_k2048_compute_kernel(half* activation_hmx, ha
   }
   return TL_OK;
 }
-

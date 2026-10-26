@@ -112,9 +112,7 @@ class Q8GemvIntrinEmitter:
         return _dot_bias(dst, weight, activation, bias)
 
 
-def make_q8_0_dot_prim_func(
-    k: int, symbol: str | None = None, *, with_bias: bool = True
-):
+def make_q8_0_dot_prim_func(k: int, symbol: str | None = None, *, with_bias: bool = True):
     """Build an embeddable fixed-K PrimFunc for the Q8_0 dot atom.
 
     ``with_bias`` selects the C ABI.  Embedding runtimes should call the no-bias

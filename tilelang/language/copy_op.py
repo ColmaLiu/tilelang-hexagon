@@ -239,7 +239,10 @@ def dma_copy(src: BufferLikeType, dst: BufferLikeType) -> tirx.PrimExpr:
     destinations or overwriting sources; no separate commit is needed.
     The kernel drains the queue before returning. Its capacity defaults to 16
     and can be set with ``hexagon.dma_queue_capacity`` (1..256).
-    Worker pools and compiler-generated software pipelines are unsupported.
+    With ``T.Kernel(num_workers=...)``, each worker owns its queue and shared
+    buffers and drains outstanding copies before returning. Raw DMA calls must
+    not be mixed with this managed queue. Compiler-generated software pipelines
+    remain unsupported; use explicit prefetch and wait scheduling.
     """
     src, dst = _normalize_copy_regions(src, dst)
     if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad):

@@ -6,33 +6,43 @@
 // monolithic tl_hexagon_hmx_gemm call in this path.
 #include <tl_templates/hexagon/tl_embed.h>
 
-#include <HAP_compute_res.h>
 #include "htp-ops.h"
+#include <HAP_compute_res.h>
 
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-extern "C" int32_t tl_q4_hmx_m32_n128_k2048_embedded(
-    void *, unsigned int, float *, uint8_t *, float *);
-extern "C" int32_t tl_q4_hmx_m32_n128_k8192_embedded(
-    void *, unsigned int, float *, uint8_t *, float *);
-extern "C" int32_t tl_q4_hmx_m32_n512_k2048_embedded(
-    void *, unsigned int, float *, uint8_t *, float *);
-extern "C" int32_t tl_q4_hmx_m32_n512_k8192_embedded(
-    void *, unsigned int, float *, uint8_t *, float *);
-extern "C" int32_t tl_q4_hmx_staged_m32_n256_k2048_pack_kernel(
-    float *, void *, uint32_t *);
-extern "C" int32_t tl_q4_hmx_staged_m32_n256_k2048_dequant_kernel(
-    uint8_t *, void *, int32_t, int32_t);
-extern "C" int32_t tl_q4_hmx_staged_m32_n256_k2048_compute_kernel(
-    void *, void *, uint32_t *, void *, float *, int32_t);
-extern "C" int32_t tl_q4_hmx_staged_m32_n256_k8192_pack_kernel(
-    float *, void *, uint32_t *);
-extern "C" int32_t tl_q4_hmx_staged_m32_n256_k8192_dequant_kernel(
-    uint8_t *, void *, int32_t, int32_t);
-extern "C" int32_t tl_q4_hmx_staged_m32_n256_k8192_compute_kernel(
-    void *, void *, uint32_t *, void *, float *, int32_t);
+extern "C" int32_t tl_q4_hmx_m32_n128_k2048_embedded(void *, unsigned int,
+                                                     float *, uint8_t *,
+                                                     float *);
+extern "C" int32_t tl_q4_hmx_m32_n128_k8192_embedded(void *, unsigned int,
+                                                     float *, uint8_t *,
+                                                     float *);
+extern "C" int32_t tl_q4_hmx_m32_n512_k2048_embedded(void *, unsigned int,
+                                                     float *, uint8_t *,
+                                                     float *);
+extern "C" int32_t tl_q4_hmx_m32_n512_k8192_embedded(void *, unsigned int,
+                                                     float *, uint8_t *,
+                                                     float *);
+extern "C" int32_t tl_q4_hmx_staged_m32_n256_k2048_pack_kernel(float *, void *,
+                                                               uint32_t *);
+extern "C" int32_t tl_q4_hmx_staged_m32_n256_k2048_dequant_kernel(uint8_t *,
+                                                                  void *,
+                                                                  int32_t,
+                                                                  int32_t);
+extern "C" int32_t
+tl_q4_hmx_staged_m32_n256_k2048_compute_kernel(void *, void *, uint32_t *,
+                                               void *, float *, int32_t);
+extern "C" int32_t tl_q4_hmx_staged_m32_n256_k8192_pack_kernel(float *, void *,
+                                                               uint32_t *);
+extern "C" int32_t tl_q4_hmx_staged_m32_n256_k8192_dequant_kernel(uint8_t *,
+                                                                  void *,
+                                                                  int32_t,
+                                                                  int32_t);
+extern "C" int32_t
+tl_q4_hmx_staged_m32_n256_k8192_compute_kernel(void *, void *, uint32_t *,
+                                               void *, float *, int32_t);
 
 #ifndef TL_Q4_HMX_ENABLED
 #define TL_Q4_HMX_ENABLED 0
@@ -64,8 +74,8 @@ extern "C" int tl_dispatch(const struct tl_op_ctx *octx) {
 }
 
 // --------------------------- generated kernel dispatch ---------------------
-typedef int32_t (*tl_q4_hmx_kernel)(
-    void *, unsigned int, float *, uint8_t *, float *);
+typedef int32_t (*tl_q4_hmx_kernel)(void *, unsigned int, float *, uint8_t *,
+                                    float *);
 
 struct tl_q4_hmx_shape {
   int k;
@@ -93,8 +103,8 @@ static const struct tl_q4_hmx_shape *tl_q4_hmx_find_shape(int k, int n) {
 
 typedef int32_t (*tl_q4_pack_stage)(float *, void *, uint32_t *);
 typedef int32_t (*tl_q4_dequant_stage)(uint8_t *, void *, int32_t, int32_t);
-typedef int32_t (*tl_q4_compute_stage)(
-    void *, void *, uint32_t *, void *, float *, int32_t);
+typedef int32_t (*tl_q4_compute_stage)(void *, void *, uint32_t *, void *,
+                                       float *, int32_t);
 
 struct tl_q4_staged_shape {
   int k;
@@ -117,8 +127,7 @@ static const struct tl_q4_staged_shape *tl_q4_staged_find_shape(int k, int n) {
   const size_t count =
       sizeof(TL_Q4_STAGED_SHAPES) / sizeof(TL_Q4_STAGED_SHAPES[0]);
   for (size_t i = 0; i < count; ++i) {
-    if (TL_Q4_STAGED_SHAPES[i].k == k &&
-        (n % TL_Q4_STAGED_SHAPES[i].n) == 0) {
+    if (TL_Q4_STAGED_SHAPES[i].k == k && (n % TL_Q4_STAGED_SHAPES[i].n) == 0) {
       return &TL_Q4_STAGED_SHAPES[i];
     }
   }
@@ -142,19 +151,19 @@ struct tl_q4_dequant_work {
   int rc[TL_Q4_MAX_PARALLEL_WORKERS];
 };
 
-static void tl_q4_dequant_worker(
-    unsigned int workers, unsigned int worker, void *opaque) {
+static void tl_q4_dequant_worker(unsigned int workers, unsigned int worker,
+                                 void *opaque) {
   struct tl_q4_dequant_work *work = (struct tl_q4_dequant_work *)opaque;
   const int begin = (int)(((uint64_t)work->tiles * worker) / workers);
   const int end = (int)(((uint64_t)work->tiles * (worker + 1u)) / workers);
-  work->rc[worker] = work->dequant(
-      work->weight, work->output, begin, end);
+  work->rc[worker] = work->dequant(work->weight, work->output, begin, end);
 }
 
 // Prefer 512 output channels per kernel to amortize activation packing and HMX
-// setup; retain the 128-channel family for smaller shapes. The runtime DMA queue
-// double-buffers native weight slices at the top of VTCM while generated HMX
-// allocations grow bottom-up.  TileLang never acquires or resets the DMA engine.
+// setup; retain the 128-channel family for smaller shapes. The runtime DMA
+// queue double-buffers native weight slices at the top of VTCM while generated
+// HMX allocations grow bottom-up.  TileLang never acquires or resets the DMA
+// engine.
 static int tl_q4_hmx_run_legacy(const struct tl_op_ctx *o) {
   const struct tl_q4_hmx_shape *shape = tl_q4_hmx_find_shape(o->k, o->n);
   if (!shape || !o->dma.queue || !o->dma.push_1d || !o->dma.pop) {
@@ -175,8 +184,7 @@ static int tl_q4_hmx_run_legacy(const struct tl_op_ctx *o) {
   if (kernel_begin >= vtcm_end) {
     return -1;
   }
-  const unsigned int kernel_size =
-      (unsigned int)(vtcm_end - kernel_begin);
+  const unsigned int kernel_size = (unsigned int)(vtcm_end - kernel_begin);
   const uintptr_t output_stage_addr =
       tl_align_down(vtcm_end - output_stage_bytes, 128u);
   const uintptr_t weight_stage_1_addr =
@@ -198,12 +206,9 @@ static int tl_q4_hmx_run_legacy(const struct tl_op_ctx *o) {
   int pending_dma = 0;
 
   auto push_weight = [&](int chunk) {
-    bool pushed =
-        o->dma.push_1d(
-            o->dma.queue,
-            weight_stage[chunk & 1],
-            weight + (size_t)chunk * weight_stage_bytes,
-            (uint32_t)weight_stage_bytes) == 0;
+    bool pushed = o->dma.push_1d(o->dma.queue, weight_stage[chunk & 1],
+                                 weight + (size_t)chunk * weight_stage_bytes,
+                                 (uint32_t)weight_stage_bytes) == 0;
     pending_dma += pushed ? 1 : 0;
     return pushed;
   };
@@ -229,18 +234,14 @@ static int tl_q4_hmx_run_legacy(const struct tl_op_ctx *o) {
   for (int chunk = 0; chunk < n_chunks && rc == 0; ++chunk) {
     const int n0 = chunk * shape->n;
     for (int m0 = 0; m0 < o->m && rc == 0; m0 += 32) {
-      rc = shape->kernel(
-          (void *)kernel_begin,
-          kernel_size,
-          activation + (size_t)m0 * o->act_stride,
-          weight_stage[chunk & 1],
-          output_stage);
+      rc = shape->kernel((void *)kernel_begin, kernel_size,
+                         activation + (size_t)m0 * o->act_stride,
+                         weight_stage[chunk & 1], output_stage);
       if (rc == 0) {
         for (int m = 0; m < 32; ++m) {
-          memcpy(
-              o->dst + (size_t)(m0 + m) * o->dst_stride + n0,
-              output_stage + (size_t)m * shape->n,
-              (size_t)shape->n * sizeof(float));
+          memcpy(o->dst + (size_t)(m0 + m) * o->dst_stride + n0,
+                 output_stage + (size_t)m * shape->n,
+                 (size_t)shape->n * sizeof(float));
         }
       }
     }
@@ -263,11 +264,10 @@ static int tl_q4_hmx_run_legacy(const struct tl_op_ctx *o) {
 // functions, but lends the dequant tile range to the host's existing workers.
 // Raw 576-byte tiles are asynchronously DMA-padded to 640 bytes so every HVX
 // load is aligned and the final 64-byte scale tail is safely readable.
-static int tl_q4_hmx_run_staged(
-    const struct tl_op_ctx *o, const struct tl_q4_staged_shape *shape) {
+static int tl_q4_hmx_run_staged(const struct tl_op_ctx *o,
+                                const struct tl_q4_staged_shape *shape) {
   if (!shape || !o->dma.queue || !o->dma.push_2d || !o->dma.pop ||
-      !o->parallel.pool || !o->parallel.run ||
-      o->parallel.max_workers == 0) {
+      !o->parallel.pool || !o->parallel.run || o->parallel.max_workers == 0) {
     return -1;
   }
 
@@ -316,14 +316,9 @@ static int tl_q4_hmx_run_staged(
   int pending_dma = 0;
   auto push_weight = [&](int chunk) {
     const bool pushed =
-        o->dma.push_2d(
-            o->dma.queue,
-            weight_stage[chunk & 1],
-            weight + (size_t)chunk * weight_source_bytes,
-            640u,
-            576u,
-            576u,
-            (uint32_t)tiles) == 0;
+        o->dma.push_2d(o->dma.queue, weight_stage[chunk & 1],
+                       weight + (size_t)chunk * weight_source_bytes, 640u, 576u,
+                       576u, (uint32_t)tiles) == 0;
     pending_dma += pushed ? 1 : 0;
     return pushed;
   };
@@ -342,8 +337,7 @@ static int tl_q4_hmx_run_staged(
     }
     return -1;
   }
-  int rc = shape->pack(
-      const_cast<float *>(o->act), activation_hmx, bias_vtcm);
+  int rc = shape->pack(const_cast<float *>(o->act), activation_hmx, bias_vtcm);
   if (rc != 0 || !pop_weight()) {
     while (pending_dma > 0) {
       pop_weight();
@@ -366,19 +360,14 @@ static int tl_q4_hmx_run_staged(
     work.weight = weight_stage[chunk & 1];
     work.output = dequant_hmx;
     work.tiles = tiles;
-    rc = o->parallel.run(
-        o->parallel.pool, tl_q4_dequant_worker, &work, workers);
+    rc =
+        o->parallel.run(o->parallel.pool, tl_q4_dequant_worker, &work, workers);
     for (unsigned int worker = 0; worker < workers && rc == 0; ++worker) {
       rc = work.rc[worker];
     }
     if (rc == 0) {
-      rc = shape->compute(
-          activation_hmx,
-          dequant_hmx,
-          bias_vtcm,
-          output_hmx,
-          o->dst + (size_t)chunk * shape->n,
-          o->dst_stride);
+      rc = shape->compute(activation_hmx, dequant_hmx, bias_vtcm, output_hmx,
+                          o->dst + (size_t)chunk * shape->n, o->dst_stride);
     }
     if (rc == 0 && chunk + 2 < n_chunks && !push_weight(chunk + 2)) {
       rc = -1;
@@ -396,8 +385,7 @@ static int tl_q4_hmx_run_staged(
 }
 
 static int tl_q4_hmx_run(const struct tl_op_ctx *o) {
-  const struct tl_q4_staged_shape *staged =
-      tl_q4_staged_find_shape(o->k, o->n);
+  const struct tl_q4_staged_shape *staged = tl_q4_staged_find_shape(o->k, o->n);
   if (o->m == 32 && staged && tl_q4_hmx_run_staged(o, staged) == 0) {
     return 0;
   }

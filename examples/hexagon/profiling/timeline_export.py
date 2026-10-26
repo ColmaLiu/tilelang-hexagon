@@ -8,6 +8,7 @@ and emit a compact JSON the HTML timeline renders as zoomable colored bars.
 
 Usage: python3 timeline_export.py <logfile> <out.json>
 """
+
 import json
 import re
 import sys
@@ -42,8 +43,7 @@ def engine_of(kparams):
 
 def layer_of(names):
     # blk.N.  |  cache_k_lN  |  _lN
-    m = re.search(r"blk\.(\d+)\.", names) or re.search(r"_l(\d+)\b", names) \
-        or re.search(r"cache_[krv]_l(\d+)", names)
+    m = re.search(r"blk\.(\d+)\.", names) or re.search(r"_l(\d+)\b", names) or re.search(r"cache_[krv]_l(\d+)", names)
     return int(m.group(1)) if m else -1
 
 
@@ -64,14 +64,22 @@ for line in open(LOG, encoding="latin1"):
         continue
     op, names, dims, types, strides, kparams, usec, cyc, start, mhz, pmu = m.groups()
     eng, kern = engine_of(kparams)
-    rows.append({
-        "op": op, "eng": eng, "kern": kern, "L": layer_of(names),
-        "role": role_of(op, names),
-        "dims": dims.split(" -> ")[0].strip(),
-        "dt": types.split(" -> ")[0].strip(),
-        "usec": int(usec), "cyc": int(cyc), "start": int(start), "mhz": float(mhz),
-        "pmu": [int(x) for x in pmu.split(",")] if pmu else [],
-    })
+    rows.append(
+        {
+            "op": op,
+            "eng": eng,
+            "kern": kern,
+            "L": layer_of(names),
+            "role": role_of(op, names),
+            "dims": dims.split(" -> ")[0].strip(),
+            "dt": types.split(" -> ")[0].strip(),
+            "usec": int(usec),
+            "cyc": int(cyc),
+            "start": int(start),
+            "mhz": float(mhz),
+            "pmu": [int(x) for x in pmu.split(",")] if pmu else [],
+        }
+    )
 
 print(f"parsed {len(rows)} op instances")
 
@@ -84,6 +92,7 @@ print(f"parsed {len(rows)} op instances")
 WRAP = 1 << 32
 acc = 0
 prev = None
+prev_abs = 0
 raw_bad = 0
 for r in rows:  # keep a best-effort real start too (diagnostic only)
     s = r["start"]
@@ -96,12 +105,13 @@ for r in rows:  # keep a best-effort real start too (diagnostic only)
 
 t = 0.0
 for r in rows:
-    r["t"] = t          # packed start (us)
+    r["t"] = t  # packed start (us)
     t += r["usec"]
 span_pack = t
 span_real = None
 print(f"start-counter non-monotonic steps: {raw_bad}/{len(rows)} (per-core counter, unusable as clock)")
-print(f"packed compute span (sum of durations, = timeline length): {span_pack/1000:.1f} ms")
+print(f"packed compute span (sum of durations, = timeline length): {span_pack / 1000:.1f} ms")
+
 
 # --- detect prefill -> decode boundary: prefill has batched MUL_MAT (act ne1>8) ---
 def act_ne1(dims):
@@ -110,6 +120,7 @@ def act_ne1(dims):
         return 1
     nums = re.findall(r"(\d+)", parts[1])
     return int(nums[1]) if len(nums) > 1 else 1
+
 
 pref_end = 0
 for i, r in enumerate(rows):
@@ -120,14 +131,17 @@ print(f"prefill: ops[0:{prefill_ops}]  decode: ops[{prefill_ops}:{len(rows)}]")
 
 # per-op-type + engine totals (packed)
 from collections import defaultdict
+
 tot = defaultdict(lambda: [0, 0])
 eng_tot = defaultdict(lambda: [0, 0])
 for r in rows:
-    tot[r["op"]][0] += r["usec"]; tot[r["op"]][1] += 1
-    eng_tot[r["eng"]][0] += r["usec"]; eng_tot[r["eng"]][1] += 1
+    tot[r["op"]][0] += r["usec"]
+    tot[r["op"]][1] += 1
+    eng_tot[r["eng"]][0] += r["usec"]
+    eng_tot[r["eng"]][1] += 1
 print("\nby engine (packed us):")
 for e, (u, n) in sorted(eng_tot.items(), key=lambda x: -x[1][0]):
-    print(f"  {e:<12}{u:>8} us  {100*u/span_pack:>5.1f}%  x{n}")
+    print(f"  {e:<12}{u:>8} us  {100 * u / span_pack:>5.1f}%  x{n}")
 
 # --- compact export: intern op names, roles, dims, dtypes ---
 op_names = sorted({r["op"] for r in rows})
@@ -143,16 +157,18 @@ ei = {v: i for i, v in enumerate(engs)}
 
 recs = []
 for r in rows:
-    recs.append([
-        round(r["t"], 2),           # 0 start us (real)
-        r["usec"],                  # 1 duration us
-        oi[r["op"]],                # 2 op idx
-        ei[r["eng"]],               # 3 engine idx
-        r["L"],                     # 4 layer (-1 unknown)
-        ri[r["role"]],              # 5 role idx
-        di[r["dims"]],              # 6 dims idx
-        ti[r["dt"]],                # 7 dtype idx
-    ])
+    recs.append(
+        [
+            round(r["t"], 2),  # 0 start us (real)
+            r["usec"],  # 1 duration us
+            oi[r["op"]],  # 2 op idx
+            ei[r["eng"]],  # 3 engine idx
+            r["L"],  # 4 layer (-1 unknown)
+            ri[r["role"]],  # 5 role idx
+            di[r["dims"]],  # 6 dims idx
+            ti[r["dt"]],  # 7 dtype idx
+        ]
+    )
 
 # --- step boundaries: a new forward pass starts at layer-0 GET_ROWS ---
 step_idx = [i for i, r in enumerate(rows) if r["op"] == "GET_ROWS" and r["L"] == 0]
@@ -179,11 +195,15 @@ out = {
         "span_pack_ms": round(span_pack / 1000, 1),
         "prefill_ops": prefill_ops,
     },
-    "op_names": op_names, "roles": roles, "dims": dims_tab, "dtypes": dt_tab,
+    "op_names": op_names,
+    "roles": roles,
+    "dims": dims_tab,
+    "dtypes": dt_tab,
     "engines": engs,
     "steps": steps,
     "recs": recs,
 }
 json.dump(out, open(OUT, "w"), separators=(",", ":"))
 import os
-print(f"\nwrote {OUT}  ({os.path.getsize(OUT)//1024} KB, {len(recs)} recs)")
+
+print(f"\nwrote {OUT}  ({os.path.getsize(OUT) // 1024} KB, {len(recs)} recs)")

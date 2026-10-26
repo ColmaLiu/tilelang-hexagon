@@ -11,6 +11,7 @@ persistent low-latency agent is an M3 concern.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import os
 import re
@@ -25,6 +26,7 @@ from . import _fastrpc
 from .build import build_cmake_fastrpc
 from .device import AdbConnection, HexagonConnection
 from .env import HexagonSDK
+from .runtime_config import device_serial
 
 # The kernel entry is the non-static generated function.  Hexagon kernels return
 # int32_t so the FastRPC skel can propagate failures; older/source kernels may
@@ -56,7 +58,7 @@ class HexagonKernelAdapter(BaseKernelAdapter):
         kernel_name: str | None = None,
         connection: HexagonConnection | None = None,
         sdk: HexagonSDK | None = None,
-        dsp_arch: str = "v79",  # SM8750/Hexagon v79 hardware (see env.py)
+        dsp_arch: str | None = None,
         verbose: bool = False,
         workdir: str | None = None,
         use_agent: bool = True,
@@ -65,8 +67,8 @@ class HexagonKernelAdapter(BaseKernelAdapter):
         self.kernel_name = kernel_name or _kernel_name(kernel_source)
         self.target = target
         self.verbose = verbose
-        self.dsp_arch = dsp_arch
-        self.sdk = (sdk or HexagonSDK(dsp_arch=dsp_arch)).validate()
+        self.sdk = (sdk or (HexagonSDK(dsp_arch=dsp_arch) if dsp_arch else HexagonSDK())).validate()
+        self.dsp_arch = dsp_arch or self.sdk.dsp_arch
         self._param_list = list(params)
         # Legalize negative output indices (e.g. out_idx=-1) up front: _deploy()
         # consumes self._result_idx before BaseKernelAdapter.__init__ runs, so we
@@ -85,16 +87,16 @@ class HexagonKernelAdapter(BaseKernelAdapter):
     # ---- build + deploy ---------------------------------------------------
     def _connection(self) -> HexagonConnection:
         if self._conn is None:
-            serials = AdbConnection.list_devices()
-            if not serials:
-                raise RuntimeError("no authorized adb device found (check `adb devices`)")
-            self._conn = AdbConnection(serial=serials[0])
+            if os.environ.get("TILELANG_HEXAGON_HLOS") == "linux":
+                from .linux_runtime import LinuxConnection
+
+                self._conn = LinuxConnection.from_environment()
+                return self._conn
+            self._conn = AdbConnection(serial=device_serial())
         return self._conn
 
     def _deploy(self) -> None:
-        proj, iface = _fastrpc.write_project(
-            self._workdir, self.kernel_name, self.kernel_source, self._param_list, self._result_idx
-        )
+        proj, iface = _fastrpc.write_project(self._workdir, self.kernel_name, self.kernel_source, self._param_list, self._result_idx)
         self._iface = iface
         if self.verbose:
             print(f"[hexagon] FastRPC project: {proj} (iface={iface})")
@@ -110,10 +112,14 @@ class HexagonKernelAdapter(BaseKernelAdapter):
         has_scalar = any(p.is_scalar() for p in self._param_list)
         if self._use_agent and artifacts.agent_exe and not has_scalar:
             from .agent import HexagonAgentSession
+
             idx = next(HexagonKernelAdapter._port_seq)
             port = 10000 + (os.getpid() * 13 + idx) % 40000
             self._agent = HexagonAgentSession(
-                artifacts.dsp_skel, artifacts.agent_exe, self._param_list, self._result_idx,
+                artifacts.dsp_skel,
+                artifacts.agent_exe,
+                self._param_list,
+                self._result_idx,
                 serial=getattr(conn, "serial", None),
                 device_port=port,
                 workdir=f"/data/local/tmp/tilelang_hex_agent_{os.getpid()}_{idx}",
@@ -127,16 +133,14 @@ class HexagonKernelAdapter(BaseKernelAdapter):
             self._agent = None
 
     def __del__(self):
-        try:
+        with contextlib.suppress(Exception):
             self.close()
-        except Exception:  # noqa: BLE001
-            pass
 
     def _agent_forward(self, *ins):
         params, result_idx = self._param_list, set(self._result_idx)
         it = iter(ins)
         in_arrays = []
-        for i, p in enumerate(params):
+        for i, _param in enumerate(params):
             if i in result_idx:
                 continue
             in_arrays.append(next(it).detach().to("cpu").contiguous().numpy())
@@ -162,9 +166,7 @@ class HexagonKernelAdapter(BaseKernelAdapter):
             it = iter(ins)
             for i, p in enumerate(params):
                 if i in result_idx:
-                    values[i] = torch.empty(
-                        tuple(int(s) for s in p.shape), dtype=p.torch_dtype(), device="cpu"
-                    )
+                    values[i] = torch.empty(tuple(int(s) for s in p.shape), dtype=p.torch_dtype(), device="cpu")
                 else:
                     t = next(it)
                     values[i] = t.detach().to("cpu").contiguous()

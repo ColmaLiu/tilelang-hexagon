@@ -5,7 +5,7 @@
 #include "op/builtin.h"
 #include "support/check.h"
 
-#include <tvm/ir/op.h>             // Op::Get (exp intrinsic match)
+#include <tvm/ir/op.h> // Op::Get (exp intrinsic match)
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>     // UsesVar (HVX elementwise vectorizer)
 #include <tvm/tirx/stmt_functor.h> // PostOrderVisit (per-worker VTCM pre-pass)
@@ -146,9 +146,10 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
   this->InitFuncState(f);
   ReserveKeywordsAsUnique();
   // Reserve the first 2KB VTCM tile (offset 0) for the HMX output scales that
-  // tl_hexagon_hmx_gemm writes at tl_vtcm_base()+0; alloc_shared buffers start
-  // above it, so operands and scales can never overlap regardless of the runtime
-  // VTCM size.  (Non-HMX shared kernels just leave the first tile unused.)
+  // the session/bridge initializes at tl_vtcm_base()+0; alloc_shared buffers
+  // start above it, so operands and scales can never overlap regardless of the
+  // runtime VTCM size.  (Non-HMX shared kernels just leave the first tile
+  // unused.)
   vtcm_offset_ = 2048;
 
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
@@ -160,9 +161,9 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
   bool no_alias = f->HasNonzeroAttr(tirx::attr::kNoAlias);
 
   // Worker-pool mode: `hexagon.num_workers` > 0 fans the grid's outermost block
-  // loop across HW threads via tl_parallel instead of a serial for-loop.  Reset the
-  // per-emit flags too (defensive: an exception mid-emit on a prior function must
-  // not leak state into this one).
+  // loop across HW threads via tl_parallel instead of a serial for-loop.  Reset
+  // the per-emit flags too (defensive: an exception mid-emit on a prior
+  // function must not leak state into this one).
   wp_num_workers_ = 0;
   wp_emit_ = false;
   wp_outermost_pending_ = false;
@@ -187,24 +188,24 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
     dma_capacity_ = static_cast<int>(capacity.value()->value);
   }
   if (dma_async_) {
-    ICHECK_EQ(wp_num_workers_, 0)
-        << "Hexagon async DMA does not support worker pools";
     ICHECK(!raw_dma)
         << "Hexagon async DMA cannot share a kernel with raw DMA calls";
     name_supply_->ReserveName("tl_dma_async");
     decl_stream << "#include <tl_templates/hexagon/dma.h>\n";
   }
 
-  // Reserve the worker callback's fixed identifiers BEFORE assigning param ids, so a
-  // kernel parameter named e.g. "tl_nw" can't collide with them (mirrors how the
-  // CUDA backend reserves its runtime helper names).
+  // Reserve the worker callback's fixed identifiers BEFORE assigning param ids,
+  // so a kernel parameter named e.g. "tl_nw" can't collide with them (mirrors
+  // how the CUDA backend reserves its runtime helper names).
   if (wp_num_workers_ > 0) {
-    for (const char *nm : {"tl_p", "tl_a", "tl_args", "tl_wid", "tl_nw", "tl_en"})
+    for (const char *nm :
+         {"tl_p", "tl_a", "tl_args", "tl_wid", "tl_nw", "tl_en"})
       name_supply_->ReserveName(nm);
   }
 
-  // Pre-assign param ids and register handle element types (needed before the body
-  // is emitted, and reused by the worker-pool args struct / unpack / signature).
+  // Pre-assign param ids and register handle element types (needed before the
+  // body is emitted, and reused by the worker-pool args struct / unpack /
+  // signature).
   std::vector<std::string> pvids;
   pvids.reserve(f->params.size());
   for (size_t i = 0; i < f->params.size(); ++i) {
@@ -242,12 +243,9 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
   std::string name = static_cast<std::string>(global_symbol.value());
 
   if (wp_num_workers_ > 0) {
-    // Pre-pass: size each worker's private VTCM region.  It holds the alloc_shared
-    // operands at the bottom (wp_operand_bytes_) and the HMX gemm's Crouton scratch
-    // at the top (wp_gemm_scratch_, max over gemms — scratch is reused per gemm), so
-    // wp_stride_ = operands + scratch and worker w owns [2048+w*stride, 2048+(w+1)*stride).
+    // Pre-pass: size each worker's private alloc_shared region. Explicit HMX
+    // atoms and layout copies use these buffers without hidden GEMM scratch.
     wp_operand_bytes_ = 0;
-    wp_gemm_scratch_ = 0;
     wp_uses_hmx_ = false;
     tirx::PostOrderVisit(f->body, [&](const ffi::ObjectRef &node) {
       if (const auto *a = node.as<AllocBufferNode>()) {
@@ -257,9 +255,9 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
           for (const auto &d : a->buffer->shape) {
             const auto *imm = d.as<IntImmNode>();
             // Match the emission's static-shape requirement (the ICHECK in
-            // VisitStmt_(AllocBufferNode)) so this pre-pass sum can never diverge
-            // from the per-alloc vtcm_offset_ bump (a divergence would overlap or
-            // waste worker regions).
+            // VisitStmt_(AllocBufferNode)) so this pre-pass sum can never
+            // diverge from the per-alloc vtcm_offset_ bump (a divergence would
+            // overlap or waste worker regions).
             ICHECK(imm) << "worker-pool alloc_shared requires a static shape";
             n *= static_cast<size_t>(imm->value);
           }
@@ -270,30 +268,9 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
         if (IsHexagonHMXIntrinsic(call)) {
           wp_uses_hmx_ = true;
         }
-        // T.gemm->HMX lowers to tl_hexagon_hmx_gemm(C,A,B,M,N,K,ta,tb); it needs
-        // Crouton scratch (a_sz+b_sz+c_sz tiles) in this worker's region — size it
-        // from M=args[4]/N=args[5]/K=args[6] and keep the max.
-        if (!call->args.empty()) {
-          if (const auto *s = call->args[0].as<StringImmNode>()) {
-            if (s->value == "tl_hexagon_hmx_gemm") {
-              wp_uses_hmx_ = true;
-              auto cdim = [&](size_t i) -> size_t {
-                const auto *imm = call->args[i].as<IntImmNode>();
-                ICHECK(imm) << "worker-pool T.gemm requires static M/N/K";
-                return static_cast<size_t>(imm->value);
-              };
-              size_t M = cdim(4), N = cdim(5), K = cdim(6);
-              size_t tiles = (M / 32) * (K / 32) + (N / 32) * (K / 32) +
-                             (M / 32) * (N / 32);
-              size_t sc_bytes = tiles * 1024u * 2u; // tile elems * sizeof(fp16)
-              if (sc_bytes > wp_gemm_scratch_)
-                wp_gemm_scratch_ = sc_bytes;
-            }
-          }
-        }
       }
     });
-    wp_stride_ = wp_operand_bytes_ + wp_gemm_scratch_;
+    wp_stride_ = wp_operand_bytes_;
     // (1) args struct: one plain field per kernel parameter.
     stream << "typedef struct {\n";
     for (size_t i = 0; i < f->params.size(); ++i) {
@@ -302,9 +279,10 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
       stream << " " << pvids[i] << ";\n";
     }
     stream << "} " << name << "_args_t;\n";
-    // (2) worker callback: unpack params into same-named locals (so the body emits
-    //     unchanged), then run the grid with the OUTERMOST block loop strided across
-    //     workers (wp_outermost_pending_ tells the AttrStmt handler).
+    // (2) worker callback: unpack params into same-named locals (so the body
+    // emits
+    //     unchanged), then run the grid with the OUTERMOST block loop strided
+    //     across workers (wp_outermost_pending_ tells the AttrStmt handler).
     stream << "static int " << name
            << "_worker(void* tl_p, int tl_wid, int tl_nw) {\n";
     stream << "  " << name << "_args_t* tl_a = (" << name << "_args_t*)tl_p;\n";
@@ -313,44 +291,58 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
       CodeGenC::PrintType(GetType(f->params[i]), stream);
       stream << " " << pvids[i] << " = tl_a->" << pvids[i] << ";\n";
     }
+    if (dma_async_) {
+      // The descriptors and FIFO belong to this invocation of the worker, just
+      // like its private VTCM slice. Never share a queue between callbacks.
+      stream << "  tl_hexagon_dma_async_context<" << dma_capacity_
+             << "> tl_dma_async;\n";
+      stream << "  if (tl_dma_async.status != TL_OK) return TL_ERR_DMA;\n";
+    }
     if (wp_uses_hmx_) {
-      // Each worker enables HMX for its OWN thread (per-thread SHARED lock), except
-      // the session thread (worker 0 / inline fallback) which session_init already
-      // enabled — keyed on tid so it's exactly once per thread.
+      // Each worker enables HMX for its OWN thread (per-thread SHARED lock),
+      // except the session thread (worker 0 / inline fallback) which
+      // session_init already enabled — keyed on tid so it's exactly once per
+      // thread.
       stream << "  int tl_en = (qurt_thread_get_id() != tl_hmx_session_tid);\n";
       // Refuse rather than run MACs with HMX unlocked if the per-thread enable
       // fails; the nonzero code is OR-reduced by tl_parallel into the entry's
       // return, so the host sees a clean failure instead of partial output.
       stream << "  if (tl_en && tl_hmx_enable() != 0) return TL_ERR_HMX;\n";
+      if (dma_async_)
+        stream << "  if (tl_en) tl_dma_async.disable_hmx = tl_hmx_disable;\n";
     }
     this->PreFunctionBody(f);
     wp_emit_ = true;
     wp_outermost_pending_ = true;
     int worker_scope = this->BeginScope();
     this->PrintStmt(f->body);
+    if (dma_async_)
+      stream << "  if (tl_dma_async.wait(0) != TL_OK) return TL_ERR_DMA;\n";
     this->EndScope(worker_scope);
     wp_emit_ = false;
-    // The body must have contained a blockIdx.x loop for the stride to attach to;
-    // otherwise tl_parallel would run the WHOLE grid on every worker (duplicated
-    // work + a write race on the outputs).  Reject that loudly.
+    // The body must have contained a blockIdx.x loop for the stride to attach
+    // to; otherwise tl_parallel would run the WHOLE grid on every worker
+    // (duplicated work + a write race on the outputs).  Reject that loudly.
     ICHECK(!wp_outermost_pending_)
         << "CodeGenTileLangHexagon: a hexagon.num_workers kernel must have a "
-           "blockIdx.x grid loop to distribute across workers, but none was found.";
+           "blockIdx.x grid loop to distribute across workers, but none was "
+           "found.";
     wp_outermost_pending_ = false;
-    if (wp_uses_hmx_)
+    if (wp_uses_hmx_ && !dma_async_)
       stream << "  if (tl_en) tl_hmx_disable();\n";
     stream << "  return TL_OK;\n";
     stream << "}\n";
-    // (3) entry: build the args struct and dispatch (workers capped by HW threads).
+    // (3) entry: build the args struct and dispatch (workers capped by HW
+    // threads).
     this->PrintFuncPrefix(stream);
     // The kernel entry returns an int32 status (0 = ok).  f->ret_type is void
-    // here: for the Hexagon device target SplitHostDevice does NOT take its int32
-    // error-propagation path (verified — PrintType(f->ret_type) emits `void`), so
-    // it appends no ret(0) and leaves the type void.  The codegen therefore
-    // declares the status type itself and emits the `return`s explicitly below, at
-    // controlled points — notably AFTER tl_hmx_disable in the worker callback (a
-    // framework-appended ret(0) would land before it and skip the disable).  The
-    // skel maps a nonzero return to AEE_EFAILED.
+    // here: for the Hexagon device target SplitHostDevice does NOT take its
+    // int32 error-propagation path (verified — PrintType(f->ret_type) emits
+    // `void`), so it appends no ret(0) and leaves the type void.  The codegen
+    // therefore declares the status type itself and emits the `return`s
+    // explicitly below, at controlled points — notably AFTER tl_hmx_disable in
+    // the worker callback (a framework-appended ret(0) would land before it and
+    // skip the disable).  The skel maps a nonzero return to AEE_EFAILED.
     stream << "int32_t";
     this->PrintExtraAttrs(f, stream);
     stream << " " << name << "(";
@@ -361,24 +353,28 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
       stream << (i ? ", " : " ") << pvids[i];
     stream << " };\n";
     stream << "  int tl_nw = tl_num_workers();\n";
-    stream << "  if (tl_nw > " << wp_num_workers_ << ") tl_nw = " << wp_num_workers_
-           << ";\n";
+    stream << "  if (tl_nw > " << wp_num_workers_
+           << ") tl_nw = " << wp_num_workers_ << ";\n";
     if (wp_stride_ > 0) {
-      // Cap workers so nw private VTCM regions (wp_stride_ bytes each) fit alongside
-      // the reserved scale tile.  The compile-time guard above is against an 8MB
-      // constant; here we check the ACTUAL runtime grant.  If not even one region
-      // fits (smaller SKU / partial VTCM grant), fail with TL_ERR_VTCM rather than
-      // run a partial grid or let a worker write past the arena.
+      // Cap workers so nw private VTCM regions (wp_stride_ bytes each) fit
+      // alongside the reserved scale tile.  The compile-time guard above is
+      // against an 8MB constant; here we check the ACTUAL runtime grant.  If
+      // not even one region fits (smaller SKU / partial VTCM grant), fail with
+      // TL_ERR_VTCM rather than run a partial grid or let a worker write past
+      // the arena.
       stream << "  tl_vtcm_acquire();\n";
-      stream << "  if ((size_t)tl_vtcm_total >= 2048u + " << wp_stride_ << "u) {\n";
+      stream << "  if ((size_t)tl_vtcm_total >= 2048u + " << wp_stride_
+             << "u) {\n";
       stream << "    unsigned tl_cap = (unsigned)((tl_vtcm_total - 2048u) / "
              << wp_stride_ << "u);\n";
       stream << "    if ((unsigned)tl_nw > tl_cap) tl_nw = (int)tl_cap;\n";
-      stream << "    return tl_parallel(" << name << "_worker, &tl_args, tl_nw);\n";
+      stream << "    return tl_parallel(" << name
+             << "_worker, &tl_args, tl_nw);\n";
       stream << "  }\n";
       stream << "  return TL_ERR_VTCM;\n";
     } else {
-      stream << "  return tl_parallel(" << name << "_worker, &tl_args, tl_nw);\n";
+      stream << "  return tl_parallel(" << name
+             << "_worker, &tl_args, tl_nw);\n";
     }
     stream << "}\n\n";
     return;
@@ -386,7 +382,8 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
 
   // Serial path (single HW thread): the grid lowers to nested for-loops.
   this->PrintFuncPrefix(stream);
-  stream << "int32_t"; // int32 status (see worker-pool entry); body emits return TL_OK
+  stream << "int32_t"; // int32 status (see worker-pool entry); body emits
+                       // return TL_OK
   this->PrintExtraAttrs(f, stream);
   stream << " " << name << "(";
   emit_signature();
@@ -402,7 +399,8 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
   if (dma_async_)
     stream << "  if (tl_dma_async.wait(0) != TL_OK) return TL_ERR_DMA;\n";
   // VTCM is acquired+checked once at session _open and held, so a serial kernel
-  // can't fail mid-run here; emit success.  (Worker-pool entries return earlier.)
+  // can't fail mid-run here; emit success.  (Worker-pool entries return
+  // earlier.)
   this->PrintIndent();
   this->stream << "return TL_OK;\n";
   this->EndScope(func_scope);
@@ -422,16 +420,17 @@ void CodeGenTileLangHexagon::VisitStmt_(const AllocBufferNode *op) {
   ICHECK_GT(constant_size, 0) << "Can only handle constant size allocation";
 
   std::string scope = GetPtrStorageScope(op->buffer->data);
-  bool is_shared = scope == "shared" || scope == "shared.dyn" || scope == "shared.tmem";
+  bool is_shared =
+      scope == "shared" || scope == "shared.dyn" || scope == "shared.tmem";
 
   this->PrintIndent();
   if (is_shared) {
-    // VTCM-backed: the HMX matrix engine reads operands from VTCM (mxmem) and HVX
-    // wants its scratch there, so a `shared` tile cannot live on the stack.
-    // Assign a compile-time byte offset into the one session-acquired VTCM arena
-    // (tl_vtcm_base()).  Shared buffers are declared inside the serialized block
-    // loop, so a *fixed* offset (reused across block iterations) is correct —
-    // not a runtime bump that would overrun.
+    // VTCM-backed: the HMX matrix engine reads operands from VTCM (mxmem) and
+    // HVX wants its scratch there, so a `shared` tile cannot live on the stack.
+    // Assign a compile-time byte offset into the one session-acquired VTCM
+    // arena (tl_vtcm_base()).  Shared buffers are declared inside the
+    // serialized block loop, so a *fixed* offset (reused across block
+    // iterations) is correct — not a runtime bump that would overrun.
     size_t nbytes = constant_size * op->buffer->dtype.bytes();
     size_t offset = vtcm_offset_;
     // 2048-byte align == one HMX Crouton tile, also HVX(128B)-aligned.
@@ -443,16 +442,14 @@ void CodeGenTileLangHexagon::VisitStmt_(const AllocBufferNode *op) {
     PrintType(op->buffer->dtype, stream);
     stream << "*)((char*)tl_vtcm_base() + " << offset;
     if (wp_emit_) {
-      // Worker-pool: each worker (tl_wid) gets a disjoint VTCM slice of wp_stride_
-      // bytes, so concurrent blocks never share a buffer.
+      // Worker-pool: each worker (tl_wid) gets a disjoint VTCM slice of
+      // wp_stride_ bytes, so concurrent blocks never share a buffer.
       stream << " + (size_t)tl_wid * " << wp_stride_ << "u";
     }
     stream << ");\n";
-    // Publish the running bottom high-water so a top-down VTCM consumer (the HMX
-    // gemm scratch) won't overlap this (and prior) live shared tiles.  Skipped in
-    // worker-pool mode: the per-worker gemm (tl_hexagon_hmx_gemm_mt) uses the
-    // codegen-passed op_floor for its own slice, not this global high-water, so the
-    // value is unused there and would be a racy cross-worker write.
+    // Publish static VTCM usage for embedding/export capacity checks. Worker
+    // kernels use their private region stride and must not write shared
+    // metadata.
     if (!wp_emit_) {
       this->PrintIndent();
       stream << "tl_vtcm_shared_high_water = " << vtcm_offset_ << "u;\n";
@@ -505,43 +502,26 @@ void CodeGenTileLangHexagon::VisitExpr_(const CallNode *op,
     return;
   }
 
-  // In a worker-pool kernel a T.gemm (tl_hexagon_hmx_gemm) is REWRITTEN to the
-  // region-aware tl_hexagon_hmx_gemm_mt so its Crouton scratch lives in THIS
-  // worker's VTCM slice (the plain entry carves from the global VTCM top, which
-  // would collide across workers). Scratch-free Crouton pack/unpack calls are
-  // emitted unchanged; other tl_hexagon_hmx* externs are rejected loudly.
+  // Layout-copy externs operate on caller-owned buffers. Stateful HMX atoms
+  // are handled above; other HMX externs are unsupported inside worker kernels.
   if (wp_emit_ && !op->args.empty()) {
     if (const auto *s = op->args[0].as<StringImmNode>()) {
-      if (s->value == "tl_hexagon_hmx_gemm") {
-        // Rewrite T.gemm to the region-aware worker variant: its Crouton scratch
-        // lives in THIS worker's VTCM slice, not the global top, so concurrent
-        // workers' gemms don't collide.  Append the worker's region end and operand
-        // floor (region = [2048+wid*stride, 2048+(wid+1)*stride), operands fill the
-        // bottom wp_operand_bytes_, scratch the rest).
-        os << "tl_hexagon_hmx_gemm_mt(";
-        for (size_t i = 1; i < op->args.size(); ++i) { // C,A,B,M,N,K,ta,tb
-          if (i > 1)
-            os << ", ";
-          os << PrintExpr(op->args[i]);
-        }
-        os << ", (char*)tl_vtcm_base() + 2048u + (size_t)(tl_wid + 1) * "
-           << wp_stride_ << "u"; // region_end (top of this worker's slice)
-        os << ", (char*)tl_vtcm_base() + 2048u + (size_t)tl_wid * " << wp_stride_
-           << "u + " << wp_operand_bytes_ << "u)"; // op_floor (operand high-water)
-        return;
-      }
       // Crouton pack/unpack only transforms caller-owned buffers inside this
       // worker's VTCM slice. They have no global scratch and are safe as-is.
       if (s->value == "tl_hexagon_hmx_pack_crouton" ||
-          s->value == "tl_hexagon_hmx_unpack_crouton") {
+          s->value == "tl_hexagon_hmx_unpack_crouton" ||
+          s->value == "tl_hexagon_hmx_pack_crouton_f32" ||
+          s->value == "tl_hexagon_hmx_unpack_crouton_f32") {
         CodeGenC::VisitExpr_(op, os);
         return;
       }
+      ICHECK(s->value != "tl_hexagon_hmx_copy_crouton_parallel")
+          << "hexagon.copy_workers cannot nest inside a num_workers kernel";
       if (s->value.find("tl_hexagon_hmx") == 0) {
         LOG(FATAL) << "CodeGenTileLangHexagon: this HMX call inside a "
                       "hexagon.num_workers kernel is unsupported — only "
-                      "scratch-free Crouton copy helpers and T.gemm "
-                      "(tl_hexagon_hmx_gemm) are worker-safe.";
+                      "scratch-free Crouton copy helpers and stateful HMX "
+                      "intrinsics are worker-safe.";
       }
       if (s->value.find("tl_hexagon_dma_") == 0) {
         LOG(FATAL) << "CodeGenTileLangHexagon: DMA calls inside a "
@@ -562,11 +542,13 @@ void CodeGenTileLangHexagon::VisitStmt_(const EvaluateNode *op) { // NOLINT(*)
     PrintIndent();
     stream << "tl_dma_async.release_hmx = "
            << (call->op.same_as(tl::hexagon_hmx_acquire())
-                   ? "tl_hmx_unit_release" : "nullptr") << ";\n";
+                   ? "tl_hmx_unit_release"
+                   : "nullptr")
+           << ";\n";
     return;
   }
   if (call && (IsHexagonAsyncCopy(call) || IsDMAWait(call))) {
-    ICHECK(dma_async_ && !wp_emit_);
+    ICHECK(dma_async_);
     PrintIndent();
     stream << "if (tl_dma_async.";
     if (IsDMAWait(call)) {
@@ -576,9 +558,11 @@ void CodeGenTileLangHexagon::VisitStmt_(const EvaluateNode *op) { // NOLINT(*)
       stream << "wait(" << pending->value;
     } else {
       const auto *name = call->args[0].as<StringImmNode>();
-      stream << (name->value == "tl_hexagon_dma_async_copy_1d" ? "copy_1d(" : "copy_2d(");
+      stream << (name->value == "tl_hexagon_dma_async_copy_1d" ? "copy_1d("
+                                                               : "copy_2d(");
       for (size_t i = 1; i < call->args.size(); ++i) {
-        if (i != 1) stream << ", ";
+        if (i != 1)
+          stream << ", ";
         stream << PrintExpr(call->args[i]);
       }
     }
@@ -590,10 +574,11 @@ void CodeGenTileLangHexagon::VisitStmt_(const EvaluateNode *op) { // NOLINT(*)
 
 void CodeGenTileLangHexagon::VisitStmt_(const AttrStmtNode *op) {
   // The lowered kernel keeps the GPU launch as nested `thread_extent` attrs
-  // (blockIdx/threadIdx); we serialize the grid into nested C loops, binding each
-  // thread var to its loop index.  In worker-pool mode (hexagon.num_workers > 0,
-  // set up in AddFunction) the outermost blockIdx.x loop is instead STRIDED across
-  // HW threads (`bx = tl_wid; bx += tl_nw`); inner thread loops stay serial.
+  // (blockIdx/threadIdx); we serialize the grid into nested C loops, binding
+  // each thread var to its loop index.  In worker-pool mode
+  // (hexagon.num_workers > 0, set up in AddFunction) the outermost blockIdx.x
+  // loop is instead STRIDED across HW threads (`bx = tl_wid; bx += tl_nw`);
+  // inner thread loops stay serial.
   if (op->attr_key == "thread_extent") {
     const IterVarNode *iv = op->node.as<IterVarNode>();
     ICHECK(iv != nullptr) << "thread_extent attr expects an IterVar node";
@@ -605,20 +590,22 @@ void CodeGenTileLangHexagon::VisitStmt_(const AttrStmtNode *op) {
     if (iv->thread_tag.length() != 0 && !var_idmap_.count(iv->var.get())) {
       std::string vid = AllocVarID(iv->var.get());
       std::string extent = PrintExpr(op->value);
-      // Declare the induction var in the *enclosing* C scope, not the for-header,
-      // so a later sibling-scope binding of the same thread var (the else branch,
-      // which descends without re-emitting a loop) still sees it in scope instead
-      // of referencing an identifier whose for-block has already closed.
+      // Declare the induction var in the *enclosing* C scope, not the
+      // for-header, so a later sibling-scope binding of the same thread var
+      // (the else branch, which descends without re-emitting a loop) still sees
+      // it in scope instead of referencing an identifier whose for-block has
+      // already closed.
       PrintIndent();
       stream << "int " << vid << " = 0;\n";
       PrintIndent();
       if (wp_emit_ && wp_outermost_pending_ && iv->thread_tag == "blockIdx.x") {
-        // Worker-pool: distribute the blockIdx.x grid loop across HW threads (each
-        // worker takes a strided slice); inner thread loops stay serial.  Gating on
-        // the tag (not just "first tagged") keeps the stride on the block dim.
+        // Worker-pool: distribute the blockIdx.x grid loop across HW threads
+        // (each worker takes a strided slice); inner thread loops stay serial.
+        // Gating on the tag (not just "first tagged") keeps the stride on the
+        // block dim.
         wp_outermost_pending_ = false;
-        stream << "for (" << vid << " = tl_wid; " << vid << " < " << extent << "; "
-               << vid << " += tl_nw) {\n";
+        stream << "for (" << vid << " = tl_wid; " << vid << " < " << extent
+               << "; " << vid << " += tl_nw) {\n";
       } else {
         stream << "for (" << vid << " = 0; " << vid << " < " << extent << "; ++"
                << vid << ") {\n";
@@ -664,9 +651,9 @@ CodeGenTileLangHexagon::PrintTernaryCondExpr(const T *op, const char *compare,
 // HVX elementwise ("map") vectorizer.
 //
 // The `map` half of the {gemm, copy, map, reduce} basis.  Hexagon's scalar unit
-// has no fp16, so an elementwise loop emitted as scalar C compiles to per-element
-// libcalls (__extendhfsf2 et al.).  Here we recognise the clean innermost loop a
-// `T.serial` elementwise nest lowers to —
+// has no fp16, so an elementwise loop emitted as scalar C compiles to
+// per-element libcalls (__extendhfsf2 et al.).  Here we recognise the clean
+// innermost loop a `T.serial` elementwise nest lowers to —
 //     for (j = 0; j < N; ++j)  dst[base + j] = f(src[base + j], ..., scalar[i])
 // (inner `j` contiguous, N a multiple of the 64-lane HVX width, per-row values
 // j-independent) — and emit one HVX vector per 64 columns via the validated
@@ -686,9 +673,9 @@ bool UsesLoopVar(const PrimExpr &e, const tirx::Var &j) {
 // Match an exp call in either form: the op-level intrinsic (tl.__exp and
 // tirx.exp are BOTH base-e e^x — the CUDA backend lowers tl.__exp to `exp`,
 // __exp10 to `exp10`; the DSL docstring claiming 2**x is wrong) or — after the
-// pipeline's intrinsic lowering — the call_extern to a libm symbol (exp2f base-2
-// / expf base-e).  Sets *arg to the operand and *base_e true for base-e (which
-// the emitter rescales by log2e before exp2).
+// pipeline's intrinsic lowering — the call_extern to a libm symbol (exp2f
+// base-2 / expf base-e).  Sets *arg to the operand and *base_e true for base-e
+// (which the emitter rescales by log2e before exp2).
 bool MatchExpCall(const CallNode *call, PrimExpr *arg, bool *base_e) {
   if (call->args.size() == 1) {
     if (call->op.same_as(Op::Get("tl.__exp")) ||
@@ -812,7 +799,8 @@ bool CodeGenTileLangHexagon::TryEmitHvxElementwise(const ForNode *op) {
   stream << "for (int " << jid << " = 0; " << jid << " < " << N << "; " << jid
          << " += " << kHvxF16Lanes << ") {\n";
   int scope = this->BeginScope();
-  std::optional<HvxLanes> rr = EmitHvxExpr(store->value, j, &ana, /*emit=*/true);
+  std::optional<HvxLanes> rr =
+      EmitHvxExpr(store->value, j, &ana, /*emit=*/true);
   ICHECK(rr) << "HVX emit failed after the probe passed (op-set drift?)";
   HvxLanes r = *rr;
   std::string sref = GetBufferRef(vt, store->buffer.get(), sidx);
@@ -849,7 +837,7 @@ CodeGenTileLangHexagon::EmitHvxOp(const HvxLanes &a, const HvxLanes &b,
 
 CodeGenTileLangHexagon::HvxLanes
 CodeGenTileLangHexagon::EmitHvxUnary(const HvxLanes &a, const char *fn,
-                                    bool emit) {
+                                     bool emit) {
   if (!emit)
     return {"", "", a.bcast};
   std::string lo = name_supply_->FreshName("tl_v");
@@ -870,13 +858,14 @@ CodeGenTileLangHexagon::EmitHvxExpr(const PrimExpr &e, const tirx::Var &j,
   if (!UsesLoopVar(e, j)) {
     if (!emit)
       return HvxLanes{"", "", true};
-    // Render the scalar FIRST: a j-independent subexpr that lowers to statements
-    // (a select/if_then_else/Let) emits them to `stream` here — before the splat
-    // line — instead of splitting it mid-token.
+    // Render the scalar FIRST: a j-independent subexpr that lowers to
+    // statements (a select/if_then_else/Let) emits them to `stream` here —
+    // before the splat line — instead of splitting it mid-token.
     std::string ev = PrintExpr(e);
     std::string s = name_supply_->FreshName("tl_b");
     PrintIndent();
-    stream << "HVX_Vector " << s << " = tl_hvx_splat_f((float)(" << ev << "));\n";
+    stream << "HVX_Vector " << s << " = tl_hvx_splat_f((float)(" << ev
+           << "));\n";
     return HvxLanes{s, s, true};
   }
   // j-contiguous fp16 load: widen to an fp32 (lo, hi) pair.
@@ -901,8 +890,8 @@ CodeGenTileLangHexagon::EmitHvxExpr(const PrimExpr &e, const tirx::Var &j,
       stream << "tl_hvx_widen_hf(*(const HVX_Vector*)(&" << lref << "), &" << lo
              << ", &" << hi << ");\n";
     else
-      stream << "tl_hvx_widen_hf(tl_hvx_loadu(&" << lref << "), &" << lo << ", &"
-             << hi << ");\n";
+      stream << "tl_hvx_widen_hf(tl_hvx_loadu(&" << lref << "), &" << lo
+             << ", &" << hi << ");\n";
     return HvxLanes{lo, hi, false};
   }
   // fp16<->fp32 casts are transparent (internal compute is fp32).

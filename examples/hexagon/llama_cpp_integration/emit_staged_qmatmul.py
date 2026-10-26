@@ -66,8 +66,7 @@ def emit(K: int, output_dir: Path) -> tuple[Path, Path]:
         "// Generated TileLang stages for llama.cpp-owned DMA and workers.\n"
         "#include <tl_templates/hexagon/tl_bridge.h>\n"
         "#define TL_Q4_0_PADDED_VTCM_INPUT 1\n"
-        "#include <tl_templates/hexagon/qmatmul.h>\n\n"
-        + "\n".join(kernels)
+        "#include <tl_templates/hexagon/qmatmul.h>\n\n" + "\n".join(kernels)
     )
 
     base = f"kernel_qmatmul_hmx_staged_{M}x{N}x{K}"

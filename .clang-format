@@ -6,3 +6,5 @@ ColumnLimit: 80
 
 Language: Cpp
 Standard: c++17
+# These Hexagon macros expand to complete declarations without a trailing ';'.
+StatementMacros: [Q_UNUSED, QT_REQUIRE_VERSION, TL_VEC_BINOP, TL_DEFINE_VEC]
