@@ -13,7 +13,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import tilelang
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 from step1_tilelang_kernel import (
     K,

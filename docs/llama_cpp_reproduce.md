@@ -131,28 +131,36 @@ adb shell "cd $D && LD_LIBRARY_PATH=$D \
 跟写 GPU 的 tilelang 一样——`T.alloc_shared`(落 VTCM)+ `T.copy` + 逐元素循环(codegen 会向量化到 HVX):
 
 ```python
-import tilelang, tilelang.language as T
+import tilelang
+from tilelang.hexagon import language as T
+
 
 def make_dequant_q4_0(N, K, BLK=32):
     KB = K // BLK
+
     @T.prim_func
-    def dequant(Q: T.Tensor((N, K // 2), "uint8"),    # 打包的 4-bit nibble
-                S: T.Tensor((N, KB), "float16"),       # 每 32-block 一个 fp16 尺度
-                W: T.Tensor((N, K), "float16")):       # 反量化输出
+    def dequant(
+        Q: T.Tensor((N, K // 2), "uint8"),  # 打包的 4-bit nibble
+        S: T.Tensor((N, KB), "float16"),  # 每 32-block 一个 fp16 尺度
+        W: T.Tensor((N, K), "float16"),  # 反量化输出
+    ):
         with T.Kernel(1, threads=1) as _:
             Q_sh = T.alloc_shared((N, K // 2), "uint8")
             S_sh = T.alloc_shared((N, KB), "float16")
             W_sh = T.alloc_shared((N, K), "float16")
-            T.copy(Q, Q_sh); T.copy(S, S_sh)
+            T.copy(Q, Q_sh)
+            T.copy(S, S_sh)
             for i in T.serial(N):
                 for b in T.serial(KB):
-                    for j in T.serial(16):             # 一个字节 = 两个权重(低/高 nibble)
+                    for j in T.serial(16):  # 一个字节 = 两个权重(低/高 nibble)
                         q = T.cast(Q_sh[i, b * 16 + j], "int32")
                         d = S_sh[i, b]
-                        W_sh[i, b * 32 + j]      = (T.cast(q & 0xF, "float16")      - T.cast(8, "float16")) * d
+                        W_sh[i, b * 32 + j] = (T.cast(q & 0xF, "float16") - T.cast(8, "float16")) * d
                         W_sh[i, b * 32 + j + 16] = (T.cast((q >> 4) & 0xF, "float16") - T.cast(8, "float16")) * d
             T.copy(W_sh, W)
+
     return dequant
+
 
 # 编译 → 上设备 → 对拍 numpy(独立验证,不进 llama.cpp)。M2 里就是这样把每块都验过的:
 kernel = tilelang.compile(make_dequant_q4_0(32, 256), out_idx=[2], target="hexagon")

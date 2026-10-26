@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-import tilelang.language as T
+from tilelang.hexagon import language as T
 
 TILE = 32
 TILE_ELEMS = TILE * TILE

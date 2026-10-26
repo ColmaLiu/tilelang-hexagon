@@ -16,7 +16,7 @@ committed CMakeLists builds on any checkout.
 import os
 
 import tilelang
-import tilelang.language as T
+from tilelang.hexagon import language as T
 from tilelang import tvm
 from tilelang.env import TILELANG_TEMPLATE_PATH
 from tilelang.hexagon import _fastrpc

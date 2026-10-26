@@ -1,28 +1,41 @@
-"""Lowering pipeline registration for the Hexagon backend.
+"""Lowering pipeline for the Hexagon backend.
 
-A Hexagon device kernel is sequential C with HVX/HMX intrinsics — the GPU-style
-``T.Kernel`` grid/threads are lowered to ordinary loops exactly as for the CPU
-``"c"`` backend. The Hexagon wrapper rejects automatic/parallel async DMA
-schedules before reusing the CPU pass sequence. Target copy/GEMM hooks lower
-Crouton operations and explicit async-copy submissions.
+A Hexagon device kernel is sequential C with HVX/HMX intrinsics. The launch
+stays GPU-shaped until codegen: ``MaterializeKernelLaunch`` keeps the grid as
+``blockIdx`` thread_extent scopes (one thread unless ``threads=`` says
+otherwise), and the Hexagon codegen serializes them into loops or fans the
+outer loop across the worker pool. The sequence below is the CPU pass order
+this backend was validated against, plus Hexagon's VTCM arena planning
+(``MergeSharedMemoryAllocations``). Target copy/GEMM hooks lower Crouton
+operations and explicit async-copy submissions.
 
-This module is imported by :mod:`tilelang` at init time (and *not* by
-``tilelang.hexagon.__init__``), so the lean build/deploy harness in that package
-stays importable without the tilelang native library.
+This module is imported through :mod:`tilelang.hexagon.backend` at tilelang
+init time (and *not* by ``tilelang.hexagon.__init__``), so the lean
+build/deploy harness in that package stays importable without the tilelang
+native library.
 """
 
 from __future__ import annotations
 
-from tilelang.backend.pass_pipeline import PassPipeline, register_pipeline
-from tilelang.cpu.pipeline import CPUPassPipelineBody
+from tvm import IRModule, s_tir, tirx
+from tvm.target import Target
+
+import tilelang
+from tilelang.backend.pass_pipeline.pipeline_utils import (
+    LayoutVisual,
+    allow_vectorize,
+    should_disable_shared_memory_reuse,
+    should_enable_aggressive_merge,
+    should_enable_race_check,
+    should_force_let_inline,
+)
 from tilelang.tileop.gemm.registry import register_gemm_impl
 from tilelang.cpu.op.gemm.gemm_scalar import GEMM_INST_SCALAR, GemmScalar
 from tilelang.hexagon.gemm_hmx import GEMM_INST_HMX, GemmHMX
 
 
-def HexagonPassPipelineBody(mod, target):
-    from tvm import tirx
-
+def _check_dma_schedule(mod: IRModule) -> None:
+    """Reject automatic or parallel schedules around ``T.dma_copy``."""
     for func in mod.functions.values():
         if not isinstance(func, tirx.PrimFunc):
             continue
@@ -54,10 +67,87 @@ def HexagonPassPipelineBody(mod, target):
                     )
                     if nested:
                         raise ValueError("Hexagon T.dma_copy must be submitted from serial loops")
-    return CPUPassPipelineBody(mod, target)
 
 
-register_pipeline(PassPipeline("hexagon", HexagonPassPipelineBody))
+def HexagonPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
+    _check_dma_schedule(mod)
+    mod = tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch(
+        lower_thread_binding=True,
+        default_threads=1,
+        unsupported_annotations=["cluster_dims"],
+    )(mod)
+    pass_ctx = tilelang.transform.get_pass_context()
+
+    if should_force_let_inline():
+        mod = tilelang.transform.LetInline()(mod)
+    mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
+    mod = tilelang.transform.LegalizeNegativeIndex()(mod)
+    if should_enable_race_check():
+        mod = tilelang.transform.VerifyParallelLoop()(mod)
+    mod = tilelang.transform.InjectAssumes()(mod)
+    mod = tilelang.transform.Simplify()(mod)
+    mod = tilelang.transform.CanonicalizeLegacyReducer()(mod)
+    mod = tilelang.transform.VerifyReducerEpoch()(mod)
+
+    mod = tilelang.transform.IfStmtBinding()(mod)
+    mod = tilelang.transform.PipelinePlanning()(mod)
+    mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+    mod = tilelang.transform.Simplify()(mod)
+
+    mod = tilelang.transform.LayoutInference()(mod)
+    mod = tilelang.transform.ReducerPlanAndMaterialize()(mod)
+    LayoutVisual(mod)
+    mod = tilelang.transform.LowerTileOp()(mod)
+    mod = tilelang.transform.VerifyReducerConsumed()(mod)
+
+    mod = tilelang.transform.DecoupleTypeCast()(mod)
+    mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
+    mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
+    mod = tilelang.transform.LowerAccessPtr()(mod)
+    mod = tilelang.transform.Simplify()(mod)
+    mod = tilelang.transform.HoistNonRestrictParams()(mod)
+
+    mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+    mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
+    mod = tilelang.transform.LowerOpaqueBlock()(mod)
+    mod = tilelang.transform.Simplify()(mod)
+    mod = tirx.transform.NarrowDataType(32)(mod)
+    mod = tilelang.transform.FlattenBuffer()(mod)
+    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
+    mod = tirx.transform.Simplify()(mod)
+    mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
+    mod = tilelang.transform.StorageRewrite()(mod)
+    mod = tilelang.transform.LoopUnswitching()(mod)
+    mod = tilelang.transform.UnrollLoop()(mod)
+    mod = s_tir.transform.RenormalizeSplitPattern()(mod)
+    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.RemoveNoOp()(mod)
+    mod = s_tir.transform.HoistIfThenElse()(mod)
+
+    mod = tirx.transform.VerifyMemory()(mod)
+    mod = tirx.transform.AnnotateEntryFunc()(mod)
+    mod = s_tir.transform.InferFragment()(mod)
+    mod = tilelang.transform.LowerThreadAllreduce()(mod)
+
+    mod = tilelang.transform.AnnotateDeviceRegions()(mod)
+    mod = tilelang.transform.SplitHostDevice()(mod)
+    mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
+
+    # Shared buffers live in one VTCM arena; this pass also applies the HMX
+    # operand alignments and keeps managed-DMA buffers from overlapping.
+    enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
+    disable_reuse = should_disable_shared_memory_reuse(pass_ctx=pass_ctx)
+    mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge, disable_reuse=disable_reuse)(mod)
+
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    mod = tilelang.transform.MergeIfStmt()(mod)
+    mod = tilelang.transform.MakePackedAPI()(mod)
+    mod = tilelang.transform.Simplify()(mod)
+    mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
+    return mod
+
 
 # The C++ hexagon GemmImpl (src/hexagon/op/gemm.cc) selects "hexagon.hmx" for fp16
 # 32-multiple gemms (-> GemmHMX: Crouton VTCM operands + HMX MAC), else "cpu.scalar"

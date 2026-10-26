@@ -2,7 +2,7 @@
  * \file codegen_hexagon.cc
  */
 #include "codegen_hexagon.h"
-#include "op/builtin.h"
+#include "hexagon/op/builtin.h"
 #include "support/check.h"
 
 #include <tvm/ir/op.h> // Op::Get (exp intrinsic match)

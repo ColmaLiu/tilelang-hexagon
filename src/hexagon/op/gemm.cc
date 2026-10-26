@@ -64,10 +64,6 @@ struct Gemm {
     (void)gemm_inst;
     return false;
   }
-
-  static String InstructionKind(String gemm_inst) {
-    return gemm_inst == kHexagonHMX ? String("hmx") : String("scalar");
-  }
 };
 
 } // namespace hexagon
@@ -83,7 +79,6 @@ bool RegisterHexagonGemm() {
       hexagon::Gemm::SelectInst,
       hexagon::Gemm::ComputeWarpPartition,
       hexagon::Gemm::ReuseExistingSharedLayout,
-      hexagon::Gemm::InstructionKind,
   });
   return true;
 }

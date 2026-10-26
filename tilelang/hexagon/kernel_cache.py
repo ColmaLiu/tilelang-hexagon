@@ -36,10 +36,8 @@ class HexagonKernelCache(KernelCache):
     def _load_kernel_from_disk(
         self,
         key,
-        target="auto",
-        target_host=None,
+        backend_context,
         out_idx=None,
-        execution_backend="hexagon",
         pass_configs=None,
         compile_flags=None,
         func=None,

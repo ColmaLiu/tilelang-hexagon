@@ -21,7 +21,7 @@ owns tiling, DMA, and parallelism.
 
 from dataclasses import dataclass
 
-from tilelang import language as T
+from tilelang.hexagon import language as T
 
 
 @dataclass(frozen=True)

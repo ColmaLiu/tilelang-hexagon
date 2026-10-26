@@ -5,10 +5,10 @@ packing schedules and DMA scheduling are expressed in TileLang; existing
 copy/reduce/HMX instruction primitives are selected by the backend.
 """
 
-import tilelang.language as T
+from tilelang.hexagon import language as T
 from tvm import tirx
 from tilelang.hexagon.hmx_intrin import HMXIntrinEmitter
-from tilelang.language import macro
+from tilelang.hexagon.language import macro
 from tilelang.utils.language import to_tile_region
 
 

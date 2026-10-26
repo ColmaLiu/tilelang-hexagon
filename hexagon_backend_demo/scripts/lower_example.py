@@ -17,7 +17,7 @@ def main() -> None:
     sys.path.insert(0, str(args.tilelang_root))
     import tilelang
     from examples.hexagon.example_matmul import make_matmul
-    from tilelang.utils.target import determine_target
+    from tilelang.backend.target import determine_target
 
     target = determine_target("hexagon", return_object=True)
     with target:

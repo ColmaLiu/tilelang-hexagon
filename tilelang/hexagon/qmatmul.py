@@ -7,7 +7,7 @@ can overlap four independent HVX instruction chains; group-granular atoms stay
 available for focused lowering tests.
 """
 
-from tilelang import language as T
+from tilelang.hexagon import language as T
 
 
 class Q4HMXIntrinEmitter:
