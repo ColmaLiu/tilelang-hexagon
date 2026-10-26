@@ -97,9 +97,9 @@ flowchart TB
 
 ## 3. 编译器对接层：一次 `tilelang.compile(target="hexagon")` 经过哪里
 
-### 3.1 注册（`tilelang/hexagon/pipeline.py`，32 行）
+### 3.1 注册（`tilelang/hexagon/backend.py` + `pipeline.py`）
 
-pass pipeline **原样复用 CPU 的**（`register_pipeline(PassPipeline("hexagon", CPUPassPipelineBody))`）：Hexagon kernel 是"顺序 C + intrinsics"，GPU 式 grid/threads 和 CPU 后端一样降成普通循环。gemm 注册是**双侧**的：C++ 侧管"选哪个实现"，Python 侧管"怎么 lower"（`GemmScalar` 与 `GemmHMX` 都注册在 `hexagon` target 下）。
+后端走上游的插件接口：`backend.py` 里的 `BackendModule` 清单声明 pass pipeline（`HexagonPassPipelineBody`）、设备 codegen（`target.build.tilelang_hexagon`）和 `hexagon` 执行后端。pass 顺序沿用 CPU 后端，再加上 VTCM 合并分配：Hexagon kernel 是"顺序 C + intrinsics"，GPU 式 grid/threads 保留到 codegen，由它串行化成普通循环（或分给 worker pool）。gemm 注册是**双侧**的：C++ 侧管"选哪个实现"，Python 侧管"怎么 lower"（`GemmScalar` 与 `GemmHMX` 都注册在 `hexagon` target 下）。
 
 ### 3.2 指令选择（`src/hexagon/op/gemm.cc:39-45`）
 

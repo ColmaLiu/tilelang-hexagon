@@ -18,7 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import tilelang
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 from examples.hexagon.example_qmatmul_kstream import (
     make_staged_dequant,

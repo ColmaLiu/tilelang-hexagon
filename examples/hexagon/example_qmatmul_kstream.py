@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 import tilelang
-import tilelang.language as T
+from tilelang.hexagon import language as T
 from tilelang.hexagon.hmx_intrin import HMXIntrinEmitter
 from tilelang.hexagon.qmatmul import Q4HMXIntrinEmitter
 

@@ -5,7 +5,7 @@ import re
 import tempfile
 
 import tilelang
-import tilelang.language as T
+from tilelang.hexagon import language as T
 from tilelang import tvm
 from examples.hexagon.example_flash_attention import make_flash
 from examples.hexagon.example_qmatmul import make_qmatmul
@@ -28,7 +28,7 @@ from tilelang.hexagon.hmx_intrin import (
     make_hmx_output_layout,
     make_hmx_weight_layout,
 )
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 
 def _offset(layout, *indices):

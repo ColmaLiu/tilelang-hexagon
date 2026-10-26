@@ -7,9 +7,9 @@ import re
 
 import pytest
 import tilelang
-import tilelang.language as T
+from tilelang.hexagon import language as T
 from tilelang import tvm
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 from tilelang.hexagon.hmx_intrin import HMXIntrinEmitter
 
 ROOT = Path(__file__).resolve().parents[3]

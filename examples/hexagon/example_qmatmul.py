@@ -23,7 +23,7 @@ import argparse
 import numpy as np
 import torch
 import tilelang
-import tilelang.language as T
+from tilelang.hexagon import language as T
 
 
 def make_qmatmul(M, N, K, W=128):

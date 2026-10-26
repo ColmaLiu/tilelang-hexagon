@@ -39,7 +39,7 @@ def main() -> None:
         Q8_0_TILED_LAYOUT,
         make_q8_0_dot_prim_func,
     )
-    from tilelang.utils.target import determine_target
+    from tilelang.backend.target import determine_target
 
     layout = Q8_0_TILED_LAYOUT
     assert layout.source_tile_bytes == 1088

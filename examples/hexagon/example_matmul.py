@@ -14,7 +14,7 @@ the Hexagon SDK, and an authorized device. See README.md.
 import argparse
 import torch
 import tilelang
-import tilelang.language as T
+from tilelang.hexagon import language as T
 
 
 def make_matmul(M, N, K, BM, BN):

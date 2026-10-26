@@ -51,6 +51,10 @@ PrimExpr infinity_op(PrimExpr args) {
     return FloatImm(dtype, std::numeric_limits<float>::infinity(), call->span);
   } else if (dtype.is_tfloat32()) {
     return FloatImm(dtype, std::numeric_limits<float>::infinity(), call->span);
+  } else if (dtype.is_float8_e5m2()) {
+    // e5m2 is the only fp8 format with a representable inf; the rest keep
+    // the fatal below.
+    return FloatImm(dtype, std::numeric_limits<float>::infinity(), call->span);
   }
   LOG(FATAL) << "Cannot decide infinity for type " << dtype;
   throw; // Unreachable, keeps compiler happy
@@ -62,7 +66,8 @@ TVM_REGISTER_OP("tl.infinity")
                                Integer(CallEffectKind::kPure))
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "infinity")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", infinity_op)
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", infinity_op);
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", infinity_op)
+    .set_attr<FLowerIntrinsic>("default.FLowerIntrinsic", infinity_op);
 
 PrimExpr round_ties_away_from_zero_op(PrimExpr args) {
   const CallNode *call = args.as<CallNode>();
@@ -72,10 +77,9 @@ PrimExpr round_ties_away_from_zero_op(PrimExpr args) {
   if (dtype.is_int() || dtype.is_uint() || dtype.is_bool()) {
     return call->args[0];
   }
-  ffi::String func_name =
-      dtype.is_float() && dtype.bits() == 64 ? "round" : "roundf";
   return tirx::Call(dtype, tirx::builtin::call_pure_extern(),
-                    {StringImm(func_name), call->args[0]}, call->annotations);
+                    {StringImm("tl::RoundTiesAwayFromZero"), call->args[0]},
+                    call->annotations);
 }
 
 TVM_REGISTER_OP("tl.round_ties_away_from_zero")

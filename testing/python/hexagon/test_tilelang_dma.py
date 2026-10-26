@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 import tilelang
-import tilelang.language as T
+from tilelang.hexagon import language as T
 from tilelang import tvm
 from tilelang.hexagon import _fastrpc
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 
 DMA_TEMPLATE = Path(__file__).resolve().parents[3] / "src/tl_templates/hexagon/dma.h"

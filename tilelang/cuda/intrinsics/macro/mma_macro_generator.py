@@ -1,8 +1,8 @@
 from __future__ import annotations
-import tilelang.language as T
+from enum import IntEnum
+import tilelang.cuda.language as T
 from typing import Literal
 from collections.abc import Callable
-from tilelang.common import TransformKind
 from tvm import DataType
 from tvm import tirx
 from tvm.ir import Range
@@ -28,9 +28,19 @@ from tilelang.cuda.intrinsics.layout.mma_layout import (
     mma_load_a_32x16_to_shared_16x32_layout,
     mma_load_b_32x16_to_shared_16x32_layout,
     mma_load_a_32x8_to_shared_16x16_layout,
+    shared_16x64_to_mma_32x32_layout_sr_a,
+    shared_8x64_to_mma_32x16_layout_sr_b,
 )
 
 lift = convert
+
+
+# Copied from bitblas
+class TransformKind(IntEnum):
+    NonTransform = 0
+    InterWarpTransform = 1
+    IntraWarpTransform = 2
+    LDMatrixTransform = 3
 
 
 class TensorCoreIntrinEmitter:
@@ -71,9 +81,9 @@ class TensorCoreIntrinEmitter:
 
     def __init__(
         self,
-        a_dtype: str = T.float16,
-        b_dtype: str = T.float16,
-        accum_dtype: str = T.float16,
+        a_dtype: str = "float16",
+        b_dtype: str = "float16",
+        accum_dtype: str = "float16",
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -98,6 +108,13 @@ class TensorCoreIntrinEmitter:
         self.warp_col_tiles = warp_col_tiles
         self.chunk = chunk
         self._initialize_k_dim(self.a_dtype)
+        if self.chunk % self.k_dim != 0:
+            padded_k = (self.chunk // self.k_dim + 1) * self.k_dim
+            raise ValueError(
+                f"MMA tile K={self.chunk} must be divisible by {self.k_dim} "
+                f"for the current CUDA MMA emitter (A dtype={self.a_dtype}). "
+                f"Pad the K tile to {padded_k} and zero-fill the extra K elements of both A and B."
+            )
         self._initialize_m_dim(self.a_dtype)
         self._initialize_micro_size(self.M_DIM, self.k_dim)
         self._initialize_local_size(self.M_DIM, self.n_dim, self.k_dim, self.WARP_SIZE)
@@ -115,12 +132,14 @@ class TensorCoreIntrinEmitter:
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
 
-    def _initialize_k_dim(self, a_dtype=T.float16):
+    def _initialize_k_dim(self, a_dtype="float16"):
+        # The generic operand lane maps use a 256-bit K atom. Shorter hardware
+        # instructions need different maps, as in the SM75 emitter.
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        self.k_dim = min(256 // a_dtype.bits, self.chunk)
+        self.k_dim = 256 // a_dtype.bits
 
-    def _initialize_m_dim(self, a_dtype=T.float16):
+    def _initialize_m_dim(self, a_dtype="float16"):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         if a_dtype.bits == 64:
@@ -338,6 +357,8 @@ class TensorCoreIntrinEmitter:
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
         A_other = [r.min for r in A_region.region[:-2]]
+        A_ext0 = A_region.region[-2].extent
+        A_ext1 = A_region.region[-1].extent
         A_stride_last = A_buf.shape[-1]
 
         @T.macro
@@ -352,16 +373,17 @@ class TensorCoreIntrinEmitter:
             tx, _, warp_m = self.extract_thread_binding(thread_binding)
             trans = self.a_transposed
 
-            for i in T.serial(warp_rows):
+            for i in T.unroll(warp_rows):
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
 
                 if ldmatrix_available:
                     row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
-                    src_indices = (
-                        tuple(A_other) + (A_base0 + wk + row_off, A_base1 + wi + col_off)
-                        if a_transposed
-                        else tuple(A_other) + (A_base0 + wi + row_off, A_base1 + wk + col_off)
-                    )
+                    rel_row, rel_col = (wk + row_off, wi + col_off) if a_transposed else (wi + row_off, wk + col_off)
+                    # Some lane maps cross the region boundary on the final
+                    # micro tile. Wrap the row-major in-region offset so column
+                    # overflow carries into the row.
+                    lin = T.floormod(rel_row * A_ext1 + rel_col, A_ext0 * A_ext1)
+                    src_indices = tuple(A_other) + (A_base0 + lin // A_ext1, A_base1 + T.floormod(lin, A_ext1))
                     T.ptx_ldmatrix(
                         T.bool(trans),
                         4,
@@ -434,6 +456,8 @@ class TensorCoreIntrinEmitter:
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
         B_other = [r.min for r in B_region.region[:-2]]
+        B_ext0 = B_region.region[-2].extent
+        B_ext1 = B_region.region[-1].extent
         B_stride_last = B_buf.shape[-1]
         replicate_b = self.n_dim == 16
         # ldmatrix cannot be used for int8 + trans case.
@@ -464,7 +488,7 @@ class TensorCoreIntrinEmitter:
             tx, warp_n, _ = self.extract_thread_binding(thread_binding)
             trans = not b_transposed
 
-            for i in T.serial(warp_cols):
+            for i in T.unroll(warp_cols):
                 # Assign B_shared_elem
                 wi, wk = (
                     warp_n * warp_col_tiles + i * micro_size_y,
@@ -474,11 +498,10 @@ class TensorCoreIntrinEmitter:
                 if ldmatrix_available:
                     num = 4 if replicate_b else 2
                     row_off, col_off = get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed)
-                    src_indices = (
-                        tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
-                        if b_transposed
-                        else tuple(B_other) + (B_base0 + wk + row_off, B_base1 + wi + col_off)
-                    )
+                    rel_row, rel_col = (wi + row_off, wk + col_off) if b_transposed else (wk + row_off, wi + col_off)
+                    # Apply the same region-local linear wrap as ldmatrix_a.
+                    lin = T.floormod(rel_row * B_ext1 + rel_col, B_ext0 * B_ext1)
+                    src_indices = tuple(B_other) + (B_base0 + lin // B_ext1, B_base1 + T.floormod(lin, B_ext1))
                     T.ptx_ldmatrix(
                         T.bool(trans),
                         num,
@@ -715,6 +738,9 @@ class TensorCoreIntrinEmitter:
         elif dtype_bits == 8:
             transform_func_sr_a = shared_16x32_to_mma_32x16_layout_sr_a
             transform_func_sr_b = shared_16x32_to_mma_32x16_layout_sr_b
+        elif dtype_bits == 4:
+            transform_func_sr_a = shared_16x64_to_mma_32x32_layout_sr_a
+            transform_func_sr_b = shared_8x64_to_mma_32x16_layout_sr_b
         else:
             raise ValueError(f"Unsupported dtype {dtype}")
 
@@ -902,9 +928,9 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
 
     def __init__(
         self,
-        a_dtype: str = T.float16,
-        b_dtype: str = T.float16,
-        accum_dtype: str = T.float16,
+        a_dtype: str = "float16",
+        b_dtype: str = "float16",
+        accum_dtype: str = "float16",
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -934,9 +960,6 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
             is_m_first=is_m_first,
         )
         self._initialize_transform_kind(transform_kind_a, transform_kind_b)
-
-    def _initialize_k_dim(self, a_dtype=T.float16):
-        self.k_dim = 256 // DataType(a_dtype).bits
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
         self.local_size_a = (m_dim * k_dim) // warp_size

@@ -5,7 +5,7 @@ visible without a multi-shape dispatch table. It produces three embeddable
 stages: activation pack, parallel-range Q4 dequant, and explicit HMX compute.
 """
 
-import tilelang.language as T
+from tilelang.hexagon import language as T
 from tilelang.hexagon.hmx_intrin import HMXIntrinEmitter
 from tilelang.hexagon.qmatmul import Q4HMXIntrinEmitter
 

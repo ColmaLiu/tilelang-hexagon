@@ -21,6 +21,110 @@ using namespace tirx;
 using namespace ffi;
 using namespace arith;
 
+Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
+  ICHECK_GE(dim, 0) << "ReduceOp: reduction axis must be non-negative";
+  ICHECK_LT(dim, src_layout->InputDim())
+      << "ReduceOp: reduction axis exceeds the source layout rank";
+  PrimExpr src_rep_extent = src_layout->ReplicateExtent();
+  PrimExpr reduce_extent = src_layout->InputShape()[dim];
+  Array<PrimExpr> fwd;
+  for (size_t i = 0; i + 1 < src_layout->InputDim(); ++i) {
+    fwd.push_back(InputPlaceholder(i));
+  }
+  fwd.insert(fwd.begin() + dim,
+             FloorMod(ReplicationPlaceholder(), reduce_extent));
+  PrimExpr thread = src_layout->ForwardThread(
+      fwd, FloorDiv(ReplicationPlaceholder(), reduce_extent));
+
+  Array<PrimExpr> shape = src_layout->InputShape();
+  shape.erase(shape.begin() + dim);
+  if (shape.empty()) {
+    shape.push_back(1);
+  }
+  return Fragment(shape, {}, thread, reduce_extent * src_rep_extent,
+                  std::nullopt)
+      ->CondenseReplicateVar()
+      ->BindThreadRange(src_layout->ThreadRange());
+}
+
+std::optional<int64_t> EvaluateConstantInteger(const PrimExpr &expr) {
+  if (const int64_t *constant = as_const_int(expr)) {
+    return *constant;
+  }
+
+  // Floored division/modulo (rounds toward -inf), matching FloorDiv/FloorMod.
+  auto floor_div = [](int64_t lhs, int64_t rhs) {
+    int64_t quotient = lhs / rhs;
+    int64_t remainder = lhs % rhs;
+    return quotient -
+           ((remainder != 0) && ((remainder < 0) != (rhs < 0)) ? 1 : 0);
+  };
+  auto floor_mod = [&](int64_t lhs, int64_t rhs) {
+    return lhs - floor_div(lhs, rhs) * rhs;
+  };
+
+  if (const auto *op = expr.as<AddNode>()) {
+    auto lhs = EvaluateConstantInteger(op->a);
+    auto rhs = EvaluateConstantInteger(op->b);
+    if (lhs && rhs) {
+      return *lhs + *rhs;
+    }
+  } else if (const auto *op = expr.as<SubNode>()) {
+    auto lhs = EvaluateConstantInteger(op->a);
+    auto rhs = EvaluateConstantInteger(op->b);
+    if (lhs && rhs) {
+      return *lhs - *rhs;
+    }
+  } else if (const auto *op = expr.as<MulNode>()) {
+    auto lhs = EvaluateConstantInteger(op->a);
+    auto rhs = EvaluateConstantInteger(op->b);
+    if (lhs && rhs) {
+      return *lhs * *rhs;
+    }
+  } else if (const auto *op = expr.as<FloorDivNode>()) {
+    auto lhs = EvaluateConstantInteger(op->a);
+    auto rhs = EvaluateConstantInteger(op->b);
+    if (lhs && rhs && *rhs != 0) {
+      return floor_div(*lhs, *rhs);
+    }
+  } else if (const auto *op = expr.as<FloorModNode>()) {
+    auto lhs = EvaluateConstantInteger(op->a);
+    auto rhs = EvaluateConstantInteger(op->b);
+    if (lhs && rhs && *rhs != 0) {
+      return floor_mod(*lhs, *rhs);
+    }
+  } else if (const auto *op = expr.as<CallNode>()) {
+    if (op->args.size() == 2) {
+      auto lhs = EvaluateConstantInteger(op->args[0]);
+      auto rhs = EvaluateConstantInteger(op->args[1]);
+      if (lhs && rhs) {
+        if (op->op.same_as(builtin::bitwise_xor())) {
+          return *lhs ^ *rhs;
+        }
+        if (op->op.same_as(builtin::bitwise_and())) {
+          return *lhs & *rhs;
+        }
+        if (op->op.same_as(builtin::bitwise_or())) {
+          return *lhs | *rhs;
+        }
+        if (op->op.same_as(builtin::shift_left())) {
+          ICHECK(*rhs >= 0 && *rhs < 64);
+          return *lhs << *rhs;
+        }
+        if (op->op.same_as(builtin::shift_right())) {
+          ICHECK(*rhs >= 0 && *rhs < 64);
+          return *lhs >> *rhs;
+        }
+      }
+    } else if (op->args.size() == 1 && op->op.same_as(builtin::bitwise_not())) {
+      if (auto value = EvaluateConstantInteger(op->args[0])) {
+        return ~*value;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 bool CanProveDivisible(const PrimExpr &lhs, const PrimExpr &rhs) {
   const auto *clhs = lhs.as<IntImmNode>();
   const auto *crhs = rhs.as<IntImmNode>();
@@ -111,12 +215,17 @@ Array<IterSplitExpr> get_unused_iters(const IterMark &mark,
     } else {
       used[j] = true;
       i++;
-      expected_lower_factor = splits[j]->lower_factor * splits[j]->extent;
+      expected_lower_factor =
+          analyzer->Simplify(splits[j]->lower_factor * splits[j]->extent);
     }
   }
-  bool match_full_iter =
-      analyzer->CanProveEqual(expected_lower_factor, mark->extent);
-  if (!match_full_iter) {
+  // Iter split normalization may over-approximate the original mark span.
+  // Treat over-coverage as fully covered instead of synthesizing a zero-extent
+  // leftover iterator, which later normalizes into division by zero.
+  bool covers_full_iter =
+      analyzer->CanProveEqual(expected_lower_factor, mark->extent) ||
+      analyzer->CanProve(expected_lower_factor > mark->extent);
+  if (!covers_full_iter) {
     results.emplace_back(
         mark, expected_lower_factor,
         analyzer->Simplify(FloorDiv(mark->extent, expected_lower_factor)), 1);

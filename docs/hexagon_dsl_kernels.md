@@ -36,11 +36,11 @@ The nibble decode is plain DSL arithmetic that lowers to HVX — see `examples/h
 example_qmatmul.py`. Two non-obvious rules beyond §1:
 
 ```python
-q  = T.Cast("int16", qcm[j, n])                        # widen to int16 FIRST
-lo = (q & T.Cast("int16", 0xF)) - T.Cast("int16", 8)   # then mask/shift on int16
-hi = (q >> T.Cast("int16", 4)) - T.Cast("int16", 8)    # int16 consts -> no int32 promotion
-B[2*j, n]   = T.Cast("float16", lo) * scb[2*j, n]
-B[2*j+1, n] = T.Cast("float16", hi) * scb[2*j+1, n]
+q = T.Cast("int16", qcm[j, n])  # widen to int16 FIRST
+lo = (q & T.Cast("int16", 0xF)) - T.Cast("int16", 8)  # then mask/shift on int16
+hi = (q >> T.Cast("int16", 4)) - T.Cast("int16", 8)  # int16 consts -> no int32 promotion
+B[2 * j, n] = T.Cast("float16", lo) * scb[2 * j, n]
+B[2 * j + 1, n] = T.Cast("float16", hi) * scb[2 * j + 1, n]
 ```
 - **Widen to int16 before the bitwise** — uint8 bitwise below full-register width faults;
   int16 at 64 lanes is a full register.

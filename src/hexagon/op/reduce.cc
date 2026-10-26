@@ -73,9 +73,9 @@ struct Reduce {
     }
 
     const char *fn = nullptr;
-    if (op.type->isMax())
+    if (op.type->IsMax())
       fn = fp32_source ? "tl_hvx_rowmax_mat_f32" : "tl_hvx_rowmax_mat_f16";
-    else if (op.type->isSum())
+    else if (op.type->IsSum())
       fn = fp32_source ? "tl_hvx_rowsum_mat_f32" : "tl_hvx_rowsum_mat_f16";
     else
       ICHECK(false) << "Hexagon reduce supports max/sum only.";

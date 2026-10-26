@@ -30,31 +30,37 @@
 反量化后的权重留在 VTCM(`alloc_shared`),不回 DDR。
 
 ```python
-import tilelang, tilelang.language as T
+import tilelang
+from tilelang.hexagon import language as T
+
 
 def make_qmatmul(M, N, K):
     KH = K // 2
+
     @T.prim_func
-    def qmatmul(A:   T.Tensor((M, K),  "float16"),   # 激活
-                qcm: T.Tensor((KH, N), "uint8"),     # q4_0 权重,column-major 预打包
-                scb: T.Tensor((K, N),  "float16"),   # per-(k,n) scale
-                C:   T.Tensor((M, N),  "float16")):
+    def qmatmul(
+        A: T.Tensor((M, K), "float16"),  # 激活
+        qcm: T.Tensor((KH, N), "uint8"),  # q4_0 权重,column-major 预打包
+        scb: T.Tensor((K, N), "float16"),  # per-(k,n) scale
+        C: T.Tensor((M, N), "float16"),
+    ):
         with T.Kernel(1, threads=1) as _:
             A_sh = T.alloc_shared((M, K), "float16")
             B_sh = T.alloc_shared((K, N), "float16")  # 反量化后的权重,留 VTCM
             C_sh = T.alloc_shared((M, N), "float16")
             T.copy(A, A_sh)
-            for j in T.serial(KH):                    # ── DSL q4_0 dequant → 整宽 HVX ──
+            for j in T.serial(KH):  # ── DSL q4_0 dequant → 整宽 HVX ──
                 for no in T.serial(N // 128):
-                    for ni in T.vectorized(128):      # 铁律①:填满 128B 寄存器
-                        n  = no * 128 + ni
-                        q  = T.Cast("int16", qcm[j, n])                    # 铁律②:先加宽
+                    for ni in T.vectorized(128):  # 铁律①:填满 128B 寄存器
+                        n = no * 128 + ni
+                        q = T.Cast("int16", qcm[j, n])  # 铁律②:先加宽
                         lo = (q & T.Cast("int16", 0xF)) - T.Cast("int16", 8)
                         hi = (q >> T.Cast("int16", 4)) - T.Cast("int16", 8)
-                        B_sh[2*j,   n] = T.Cast("float16", lo) * scb[2*j,   n]
-                        B_sh[2*j+1, n] = T.Cast("float16", hi) * scb[2*j+1, n]
+                        B_sh[2 * j, n] = T.Cast("float16", lo) * scb[2 * j, n]
+                        B_sh[2 * j + 1, n] = T.Cast("float16", hi) * scb[2 * j + 1, n]
             T.gemm(A_sh, B_sh, C_sh, clear_accum=True)  # → HMX(必须 clear_accum)
             T.copy(C_sh, C)
+
     return qmatmul
 ```
 
@@ -73,7 +79,7 @@ def make_qmatmul(M, N, K):
 
 ```python
 k = tilelang.compile(make_qmatmul(32, 128, 2048), out_idx=[3], target="hexagon")
-src = k.get_kernel_source()      # ← 关键:这本身就是可嵌入的 body
+src = k.get_kernel_source()  # ← 关键:这本身就是可嵌入的 body
 ```
 
 **关键事实**:`get_kernel_source()` 产出的就是一个裸的 `extern "C"` 函数,内部调用

@@ -53,9 +53,9 @@ q4_0 的 nibble 解码是**纯 DSL 算术**,lower 成满宽 HVX(不需要手写�
 `T.gemm`→HMX 融合成一个 kernel,权重留在 VTCM,不过 DDR。两条非显然的规则:
 
 ```python
-q  = T.Cast("int16", qcm[j, n])                        # 先加宽到 int16
-lo = (q & T.Cast("int16", 0xF)) - T.Cast("int16", 8)   # 再在 int16 上做 mask/shift
-hi = (q >> T.Cast("int16", 4)) - T.Cast("int16", 8)    # int16 常量 → 不被提升成 int32(否则宽度被砍到 32)
+q = T.Cast("int16", qcm[j, n])  # 先加宽到 int16
+lo = (q & T.Cast("int16", 0xF)) - T.Cast("int16", 8)  # 再在 int16 上做 mask/shift
+hi = (q >> T.Cast("int16", 4)) - T.Cast("int16", 8)  # int16 常量 → 不被提升成 int32(否则宽度被砍到 32)
 ```
 
 权重预打包成**列主**(`qcm[K/2][N]`、`sc[K/32][N]`),让反量化的写是连续的(无 interleave/shuffle)。

@@ -21,7 +21,7 @@ Requires a Hexagon device + SDK over adb (see README.md).
 import time
 import torch
 import tilelang
-import tilelang.language as T
+from tilelang.hexagon import language as T
 
 NW = 6  # workers (== the device's HW-thread count)
 

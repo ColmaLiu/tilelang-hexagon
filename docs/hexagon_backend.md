@@ -64,15 +64,15 @@ These are the decisions that keep the adaptation small and the code navigable.
 
 ```
  Layer 1  Frontend / TIR ...................... unchanged (shared with all targets)
- Layer 2  hexagon TIR pipeline ............... CPU pipeline + Hexagon tile-op lowering
+ Layer 2  hexagon TIR pipeline ............... CPU-style pass order + Hexagon tile-op lowering
  Layer 3  CodeGenTileLangHexagon ............. TIR -> C + HVX/HMX intrinsics
  Layer 4  tl_templates/hexagon/*.h ........... ALL hardware knowledge (the recipe)
  Layer 5  tilelang/hexagon/*.py .............. build + deploy + FastRPC + marshal
 ```
 
-- **Layer 2** — `tilelang/hexagon/pipeline.py` reuses the CPU pass pipeline and
-  registers the Hexagon `T.gemm` impls (`GemmHMX` for fp16 ×32 shapes, `GemmScalar`
-  fallback). Op lowering for `T.copy`/`T.gemm`/`T.fill` lives in `src/hexagon/op/*.cc`,
+- **Layer 2** — `tilelang/hexagon/pipeline.py` owns the full Hexagon pass order (the
+  CPU-style sequence plus VTCM arena planning) and registers the Hexagon `T.gemm`
+  impls (`GemmHMX` for fp16 ×32 shapes, `GemmScalar` fallback). Op lowering for `T.copy`/`T.gemm`/`T.fill` lives in `src/hexagon/op/*.cc`,
   each gated on `TargetIsHexagon` and reusing the CPU op where possible.
 - **Layer 3** — `src/hexagon/codegen/codegen_hexagon.{cc,h}`. The key overrides:
   serialize the GPU grid (`VisitStmt_(AttrStmtNode)` — `thread_extent` → nested `for`
@@ -91,20 +91,28 @@ These are the decisions that keep the adaptation small and the code navigable.
 
 ## 4. The seams — where you plug into tilelang
 
-A new target is wired in at a handful of dispatch points keyed on `target.kind.name`:
+The backend registers itself through upstream's backend plugin interface
+(`tilelang/backend/README.md`):
 
-- `tilelang/utils/target.py` — `SUPPORTED_TARGETS` + `TargetIsHexagon`
-- `tilelang/jit/execution_backend.py` — allowed backends for the target
-- `tilelang/engine/lower.py` — `device_codegen` → `target.build.tilelang_hexagon`
+- `tilelang/hexagon/backend.py` — the `BackendModule` manifest: pipeline, device
+  codegen (`target.build.tilelang_hexagon`) and the `hexagon` execution backend;
+  imported from `tilelang/__init__.py`
+- `tilelang/hexagon/pipeline.py` — the pass order, plus `register_gemm_impl(...)`
+  for the gemm dispatch
+- `tilelang/hexagon/language/` — the Hexagon dialect: `T.Kernel(num_workers=...)`,
+  `T.dma_copy`/`T.dma_wait`, `T.alloc_hmx_*` and `T.hexagon_hmx_*`. Kernels import it
+  as `from tilelang.hexagon import language as T`
 - `tilelang/cache/__init__.py` + `jit/kernel.py` — `_dispatch_map["hexagon"]` →
   `HexagonKernelCache` (in-memory only — a Hexagon "artifact" is a live device
-  deployment, not a serializable `.so`)
+  deployment, not a serializable `.so`) and the `HexagonKernelAdapter`
+- `src/hexagon/CMakeLists.txt` — native sources; `src/hexagon/target_utils.*`
+  (`TargetIsHexagon`) and `src/hexagon/op/builtin.*` (the HMX intrinsics)
 - `src/hexagon/codegen/rt_mod_hexagon.cc` — registers `target.build.tilelang_hexagon`
-- `src/hexagon/op/*.cc` (+ the CMake GLOB) — per-op lowering impls
-- `tilelang/hexagon/pipeline.py` — `register_gemm_impl(...)` for the gemm dispatch
+- `src/hexagon/op/*.cc` — per-op lowering impls
 
-Touch a comparable set to add any new backend; grep `kDLHexagon` / `"hexagon"` to see
-them all.
+A few shared passes still carry Hexagon hooks (vectorizer width, VTCM alignment,
+attribute propagation, the host/device split); grep `kDLHexagon` / `"hexagon"` to
+see them all.
 
 ---
 
@@ -112,7 +120,7 @@ them all.
 
 ```
 @T.prim_func ─► TIR
-   │  resolve_pipeline("hexagon").lower()  (LowerOpaqueBlock, LowerTileOp→HMX/HVX, ...)
+   │  BackendContext.lower() → HexagonPassPipelineBody  (LowerOpaqueBlock, LowerTileOp→HMX/HVX, ...)
    │  SplitHostDevice  (device PrimFunc; ORDER params by host decl order — see §7)
    ▼
 CodeGenTileLangHexagon  ─►  C + HVX/HMX intrinsics   (the generated kernel)

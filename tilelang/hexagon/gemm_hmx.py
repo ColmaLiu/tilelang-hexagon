@@ -12,7 +12,7 @@ selector fallback.
 
 from __future__ import annotations
 
-from tilelang import language as T
+from tilelang.hexagon import language as T
 from tilelang.hexagon.hmx_intrin import BIAS_WORDS, HMXIntrinEmitter
 from tilelang.tileop.gemm.gemm_base import GemmBase
 

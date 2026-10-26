@@ -26,9 +26,9 @@ Requires a Hexagon device + SDK over adb (see README.md).
 import argparse
 import torch
 import tilelang
-import tilelang.language as T
+from tilelang.hexagon import language as T
 from tvm import tirx
-from tilelang.language import macro
+from tilelang.hexagon.language import macro
 from tilelang.utils.language import to_tile_region
 
 EPS = 1e-5

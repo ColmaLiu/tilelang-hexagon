@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import tilelang
 from tilelang import tvm
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 
 @pytest.mark.parametrize(
