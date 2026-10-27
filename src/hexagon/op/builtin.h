@@ -94,15 +94,13 @@ TVM_DLL const Op &hexagon_sigmoid();
 TVM_DLL const Op &hexagon_erf();
 TVM_DLL const Op &hexagon_fabs();
 
-// Lane reductions: the sum, max, min, and, or or xor of the lanes of a vector
-// of whole HVX registers, a scalar. The reduce lowering finishes a vector
-// accumulator with them; they print as the hvx_math.h tl_hvx_lane_* functions.
-TVM_DLL const Op &hexagon_lane_sum();
-TVM_DLL const Op &hexagon_lane_max();
-TVM_DLL const Op &hexagon_lane_min();
-TVM_DLL const Op &hexagon_lane_and();
-TVM_DLL const Op &hexagon_lane_or();
-TVM_DLL const Op &hexagon_lane_xor();
+// tl_hvx_reduce_rows<kind, acc, aligned>(dst, src, rows, cols, src_stride,
+// dst_stride, clear) (hvx_reduce.h): reduces `rows` rows of `cols` elements
+// into one element each, accumulating in `acc`. The kind names a TL_REDUCE_*
+// constant, `acc` is a type annotation and `aligned` ("true" or "false") says
+// whether every row starts on a 128-byte boundary; the codegen prints the three
+// as template arguments.
+TVM_DLL const Op &hexagon_reduce_rows();
 
 } // namespace tl
 } // namespace tvm
