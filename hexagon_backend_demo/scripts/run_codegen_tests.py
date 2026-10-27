@@ -35,7 +35,7 @@ def main() -> None:
         test()
 
     import tilelang
-    from tilelang.hexagon.qgemv import (
+    from examples.hexagon.quantize.q8_0 import (
         Q8_0_TILED_LAYOUT,
         make_q8_0_dot_prim_func,
     )
