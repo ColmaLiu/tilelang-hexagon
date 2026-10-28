@@ -28,6 +28,9 @@ from tvm import DataType
 from . import fastrpc
 from .device import _DEFAULT_ADSP_DIRS
 
+# Seconds one call to an agent may take, its transfers included.
+CALL_TIMEOUT = 600.0
+
 
 class HexagonAgentSession:
     """Lifecycle + invoke channel for a generated FastRPC agent."""
@@ -114,6 +117,8 @@ class HexagonAgentSession:
             try:
                 s = socket.create_connection(("127.0.0.1", self.host_port), timeout=2.0)
                 s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                # A call may move hundreds of MB or run long: not the connect's timeout.
+                s.settimeout(CALL_TIMEOUT)
                 return s
             except OSError:
                 time.sleep(0.05)
@@ -186,9 +191,9 @@ class HexagonAgentSession:
                     raise ValueError(f"Hexagon agent: input {in_i} has {len(data)} bytes, the kernel takes {pl.nbytes}")
                 payloads.append(data)
             in_i += 1
-        self._sock.sendall(bytes([1, mask]))  # op=run, then the changed-mask
-        for data in payloads:
-            self._sock.sendall(data)
+        # op=run, the changed-mask, then the inputs, in one write: adb relays
+        # each write as a packet, and small packets wait out delayed ACKs.
+        self._sock.sendall(b"".join([bytes([1, mask]), *payloads]))
         # Status byte first: the agent sends 0 on success, non-zero if the kernel
         # invoke failed.  On failure no output bytes follow, so we must read this
         # before the output loop or _recvn() would block forever.
