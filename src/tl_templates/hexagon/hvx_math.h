@@ -141,6 +141,22 @@ TL_DEVICE HVX_Vector tl_hvx_exp_vsf(HVX_Vector x) {
   return tl_hvx_exp2_vsf(tl_hvx_mul_sf(x, tl_hvx_splat_f(1.4426950408889634f)));
 }
 
+// For m in [sqrt(1/2), sqrt(2)), subtract the mantissas exactly before
+// scaling on older HVX. Its sf->qf subtraction loses an input ulp near 1,
+// which becomes a large relative error in log(m).
+TL_DEVICE HVX_Vector tl_hvx_log_m_minus_one(HVX_Vector m) {
+#if __HVX_ARCH__ < 79
+  HVX_Vector one = tl_hvx_bits(0x3f800000);
+  HVX_Vector delta = Q6_Vsf_equals_Vw(Q6_Vw_vsub_VwVw(m, one));
+  HVX_Vector scale =
+      tl_hvx_select(Q6_Q_vcmp_gt_VwVw(one, m), tl_hvx_splat_f(0x1p-24f),
+                    tl_hvx_splat_f(0x1p-23f));
+  return tl_hvx_mul_sf(delta, scale);
+#else
+  return tl_hvx_sub_sf(m, tl_hvx_splat_f(1.0f));
+#endif
+}
+
 // x = m·2^e with m in [sqrt(1/2), sqrt(2)); ln m = 2·atanh(s) with
 // s = (m - 1)/(m + 1), |s| <= 0.172, so five series terms are below 1e-9.
 TL_DEVICE HVX_Vector tl_hvx_log2_vsf(HVX_Vector x) {
@@ -157,7 +173,7 @@ TL_DEVICE HVX_Vector tl_hvx_log2_vsf(HVX_Vector x) {
   m = tl_hvx_select(big, Q6_Vw_vsub_VwVw(m, tl_hvx_bits(0x00800000)), m);
   e = tl_hvx_select(big, Q6_Vw_vadd_VwVw(e, tl_hvx_bits(1)), e);
   HVX_Vector one = tl_hvx_splat_f(1.0f);
-  HVX_Vector s = tl_hvx_mul_sf(tl_hvx_sub_sf(m, one),
+  HVX_Vector s = tl_hvx_mul_sf(tl_hvx_log_m_minus_one(m),
                                tl_hvx_recip_vsf(tl_hvx_add_sf(m, one)));
   HVX_Vector s2 = tl_hvx_mul_sf(s, s);
   HVX_Vector p = tl_hvx_splat_f(1.0f / 9.0f);
@@ -383,8 +399,10 @@ TL_DEVICE HVX_Vector tl_hvx_log2_fast_vsf(HVX_Vector x) {
   m = tl_hvx_select(big, Q6_Vw_vsub_VwVw(m, tl_hvx_bits(0x00800000)), m);
   e = tl_hvx_select(big, Q6_Vw_vadd_VwVw(e, tl_hvx_bits(1)), e);
   HVX_Vector one = tl_hvx_splat_f(1.0f);
+  // Normalize the small difference through IEEE before the qfloat products;
+  // retaining the raw qfloat subtraction loses relative accuracy near m=1.
   HVX_Vector sq = Q6_Vqf32_vmpy_Vqf32Vqf32(
-      Q6_Vqf32_vsub_VsfVsf(m, one),
+      tl_hvx_qf(tl_hvx_log_m_minus_one(m)),
       tl_hvx_qf(tl_hvx_recip_fast_vsf(tl_hvx_add_sf(m, one))));
   HVX_Vector s2 = Q6_Vqf32_vmpy_Vqf32Vqf32(sq, sq);
   HVX_Vector p = Q6_Vqf32_vadd_Vqf32Vsf(
@@ -452,6 +470,9 @@ TL_DEVICE HVX_Vector tl_hvx_erf_fast_vsf(HVX_Vector x) {
 // relative for exp and exp2 and 2 ulps absolute for sigmoid, at a third to a
 // half of the cycles of two fp32 registers.
 // ---------------------------------------------------------------------------
+#if __HVX_ARCH__ >= 79
+// Older HVX qfloat arithmetic does not meet these functions' error bounds.
+// Those targets use the fp32 register kernels with one final fp16 rounding.
 TL_DEVICE HVX_Vector tl_hvx_splat_hf(float c) {
   __fp16 h = static_cast<__fp16>(c);
   short bits;
@@ -546,6 +567,7 @@ TL_DEVICE HVX_Vector tl_hvx_sigmoid_fast_vhf(HVX_Vector x) {
   return tl_hvx_recip_fast_vhf(
       Q6_Vhf_equals_Vqf16(Q6_Vqf16_vadd_VhfVhf(e, tl_hvx_splat_hf(1.0f))));
 }
+#endif
 
 // Applies a register kernel to every register of a vector. This loop and the
 // division's unroll in full: rolled, they pass every register through the stack
@@ -652,14 +674,20 @@ TL_HVX_MATH(erf, tl_hvx_erf_vsf)
     return tl_hvx_apply_hf<kernel16>(x);                                       \
   }
 
+#if __HVX_ARCH__ >= 79
 TL_HVX_MATH_HF(exp_fast, tl_hvx_exp_fast_vsf, tl_hvx_exp_fast_vhf)
 TL_HVX_MATH_HF(exp2_fast, tl_hvx_exp2_fast_vsf, tl_hvx_exp2_fast_vhf)
+TL_HVX_MATH_HF(sigmoid_fast, tl_hvx_sigmoid_fast_vsf, tl_hvx_sigmoid_fast_vhf)
+#else
+TL_HVX_MATH(exp_fast, tl_hvx_exp_fast_vsf)
+TL_HVX_MATH(exp2_fast, tl_hvx_exp2_fast_vsf)
+TL_HVX_MATH(sigmoid_fast, tl_hvx_sigmoid_fast_vsf)
+#endif
 TL_HVX_MATH(log_fast, tl_hvx_log_fast_vsf)
 TL_HVX_MATH(log2_fast, tl_hvx_log2_fast_vsf)
 TL_HVX_MATH(sqrt_fast, tl_hvx_sqrt_fast_vsf)
 TL_HVX_MATH(rsqrt_fast, tl_hvx_rsqrt_fast_vsf)
 TL_HVX_MATH(tanh_fast, tl_hvx_tanh_fast_vsf)
-TL_HVX_MATH_HF(sigmoid_fast, tl_hvx_sigmoid_fast_vsf, tl_hvx_sigmoid_fast_vhf)
 TL_HVX_MATH(erf_fast, tl_hvx_erf_fast_vsf)
 #undef TL_HVX_MATH
 #undef TL_HVX_MATH_HF
