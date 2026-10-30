@@ -89,12 +89,16 @@ These are the decisions that keep the adaptation small and the code navigable.
   Crouton matrices), `hvx_gemm.h` and `hmx_gemm.h` (the GEMMs that are functions of
   their own), `worker.h` (the HW-thread pool).
 - **Layer 5** — `tilelang/hexagon/runtime/`: `session.py` builds kernels into one
-  skel and runs them through an agent on the phone that holds their FastRPC session
-  and device-resident buffers, over a socket (`adb forward`); `build.py`/`env.py`
+  skel and runs them through an Android or Linux agent that holds their FastRPC session
+  and device-resident buffers, over a socket forwarded by ADB or SSH; `build.py`/`env.py`
   drive the Hexagon SDK build, and `fastrpc.py` holds the pieces of a project the
   skels share. `adapter.py` is `tilelang.compile`'s: a compiled kernel is a session
-  of one. On a Linux BSP (`linux_runtime.py`), with no agent, a kernel runs one call
-  at a time through a host driver of its own.
+  of one. Linux BSPs (`linux_runtime.py`) use SSH when `TILELANG_HEXAGON_SSH_HOST`
+  is set, or ADB otherwise. Each SSH file upload, download and deployment directory
+  creation has a 600-second timeout. Increase `TILELANG_HEXAGON_SSH_TRANSFER_TIMEOUT`
+  for large models or slow links, or pass `transfer_timeout` to `LinuxConnection`.
+  The value must be finite and positive; it is captured when the connection is
+  created. Changing it creates a new live adapter without rebuilding DSP binaries.
 
 ---
 
