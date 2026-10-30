@@ -461,6 +461,8 @@ static int serve(int cli, unsigned char op, int* running) {{
     uint64_t size = 0;
     if (read_full(cli, &size, 8)) return 1;
     int32_t id = -1;
+    // rpcmem_alloc takes int; validate before narrowing or zeroing its result.
+    if (size == 0 || size >= (UINT64_C(1) << 31)) return write_full(cli, &id, 4);
     for (int i = 0; i < MAX_BUFFERS; ++i) if (!g_buffers[i].ptr) {{ id = i; break; }}
     if (id >= 0) {{
       uint8_t* p = (uint8_t*)rpcmem_alloc(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_FLAG_UNCACHED, (int)size);

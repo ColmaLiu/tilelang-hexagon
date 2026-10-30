@@ -372,6 +372,16 @@ def test_invalid_allocation_size_does_not_close_session(agent):
     assert buffer.read() == bytes(128) and not agent._closed
 
 
+@pytest.mark.parametrize("size", [0, 1 << 31, 1 << 32, (1 << 64) - 1])
+def test_agent_rejects_oversized_alloc_before_narrowing_and_preserves_generations(agent, size):
+    agent._sock.sendall(bytes([session._OP_ALLOC]) + struct.pack("<Q", size))
+    assert struct.unpack("<i", agent._recv(4)) == (-1,)
+    buffer = agent.buffer(128)
+    assert buffer.id == 0 and buffer._allocation.generation == 1
+    assert agent.run_sequence([Run(agent.kernels[0], (buffer, 7))]).completed_operations == 1
+    assert _ints(buffer)[1] == 7
+
+
 def test_failed_free_closes_session_and_invalidates_views(agent, monkeypatch):
     buffer = agent.buffer(128)
     sock = agent._sock
