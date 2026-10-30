@@ -435,7 +435,8 @@ int32_t fail_after_write(int32_t* values, int32_t status) {
         assert _ints(tokens)[0] == 46 and _ints(tokens)[31] == 8
         before = history.read()
         with pytest.raises(SequenceError) as error:
-            device.run_sequence([Run(device.kernels[1], (tokens, 0x1003)), Copy(tokens, history, 128)])
+            # The DSP dispatcher adds KERNEL_STATUS_BASE to the kernel's TL_ERR_*.
+            device.run_sequence([Run(device.kernels[1], (tokens, 3)), Copy(tokens, history, 128)])
         assert (error.value.failed_index, error.value.raw_status, error.value.result.completed_operations) == (0, 0x1003, 0)
         assert len(error.value.result.runs) == 1 and history.read() == before
         assert _ints(tokens)[2] == 1
