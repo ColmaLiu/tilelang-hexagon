@@ -23,8 +23,9 @@ struct qurt_sem_t {
 static std::string failure;
 static unsigned caller_stack, allocations, frees, created, joined, semaphores;
 static unsigned opened, closed;
-static std::thread::id owner;
-static bool fail_join;
+static unsigned votes, unvotes;
+static std::thread::id owner, power_owner;
+static bool fail_join, resources_live;
 
 static void qurt_sem_init_val(qurt_sem_t *s, unsigned count) {
   s->count = count;
@@ -91,16 +92,30 @@ static void test_free(void *p) {
   std::free(p);
 }
 static int resources_open() {
+  assert(votes == 1 && unvotes == 0 && !resources_live);
+  assert(power_owner == std::this_thread::get_id());
   owner = std::this_thread::get_id();
+  resources_live = true;
   ++opened;
   return failure == "resources" ? AEE_EFAILED : AEE_SUCCESS;
 }
 static void resources_close() {
-  assert(owner == std::this_thread::get_id());
+  assert(resources_live && owner == std::this_thread::get_id());
+  resources_live = false;
   ++closed;
 }
+static void tl_power_vote() {
+  assert(votes == 0);
+  power_owner = std::this_thread::get_id();
+  ++votes;
+}
+static void tl_power_unvote() {
+  assert(!resources_live && power_owner == std::this_thread::get_id());
+  ++unvotes;
+}
 static int test_kernel(void **args) {
-  assert(owner == std::this_thread::get_id());
+  assert(resources_live && owner == std::this_thread::get_id());
+  assert(votes == 1 && unvotes == 0);
   int *value = static_cast<int *>(args[0]);
   ++*value;
   return *value == 20 ? 37 : AEE_SUCCESS;
@@ -117,15 +132,30 @@ int main(int argc, char **argv) {
   caller_stack = std::string(argv[1]) == "direct" ? 512 * 1024 : 16 * 1024;
   failure = argv[2];
   int status = tl_session_dispatch_open();
-  if (failure != "none" && failure != "join") {
+  bool startup_failure =
+      failure != "none" && failure != "join" &&
+      !(failure == "resources" && tl_session_resources_per_call);
+  if (startup_failure) {
     assert(status == (failure == "allocate" ? AEE_ENOMEMORY : AEE_EFAILED));
   } else {
     assert(status == AEE_SUCCESS);
     int value = 0;
     void *args[] = {&value};
+    assert(resources_live == !tl_session_resources_per_call);
+    assert(votes == 1 && unvotes == 0);
+    if (failure == "resources") {
+      // A call-scoped acquisition failure is returned without invoking the
+      // kernel, releases partial resources, and leaves the session usable.
+      assert(tl_session_dispatch_run(0, args) == AEE_EFAILED);
+      assert(value == 0 && opened == 1 && closed == 1 && !resources_live);
+      failure = "none";
+    }
     for (int i = 1; i <= 20; ++i) {
       assert(tl_session_dispatch_run(0, args) == (i == 20 ? 37 : AEE_SUCCESS));
       assert(value == i);
+      assert(resources_live == !tl_session_resources_per_call);
+      assert(opened - closed == (tl_session_resources_per_call ? 0u : 1u));
+      assert(votes == 1 && unvotes == 0);
     }
     assert(tl_session_dispatch_run(1, args) == AEE_EBADPARM);
     if (failure == "join") {
@@ -136,7 +166,8 @@ int main(int argc, char **argv) {
     assert(tl_session_dispatch_close() == AEE_SUCCESS);
   }
   assert(allocations == frees && created == joined);
-  assert(semaphores == 0 && opened == closed);
+  assert(semaphores == 0 && opened == closed && votes == unvotes);
+  assert(!resources_live);
   if (caller_stack >= 256 * 1024)
     assert(allocations == 0 && created == 0);
 }

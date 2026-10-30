@@ -36,6 +36,7 @@ def key(cache):
         ("HEXAGON_DSP_ARCH", "v79"),
         ("TILELANG_HEXAGON_DEVICE", "phone"),
         ("TILELANG_HEXAGON_DOMAIN", "4"),
+        ("TILELANG_HEXAGON_RESOURCE_LIFETIME", "call"),
         ("TILELANG_HEXAGON_DSP_LIBRARY_PATH", "/custom/dsp"),
         ("TILELANG_HEXAGON_SSH_HOST", "root@other"),
         ("TILELANG_HEXAGON_REMOTE_DIR", "/other/remote"),
@@ -158,6 +159,26 @@ def test_the_toolchain_is_part_of_the_key(builds, monkeypatch):
     monkeypatch.setenv("TILELANG_HEXAGON_DOMAIN", "4")
     monkeypatch.setenv("TILELANG_HEXAGON_DEVICE_LOCK", "/tmp/lock")
     builds.run()
+    assert len(builds.runs) == 2
+
+
+def test_resource_lifetime_changes_build_and_live_cache(builds, cache, monkeypatch):
+    from tilelang.hexagon.runtime import session
+
+    monkeypatch.delenv("TILELANG_HEXAGON_RESOURCE_LIFETIME", raising=False)
+    original_key = key(cache)
+    source = session.gen_dsp("test", [])
+    first = builds.run(source)
+    monkeypatch.setenv("TILELANG_HEXAGON_RESOURCE_LIFETIME", "session")
+    assert key(cache) == original_key
+    assert session.gen_dsp("test", []) == source
+    monkeypatch.setenv("TILELANG_HEXAGON_RESOURCE_LIFETIME", "call")
+    assert key(cache) != original_key
+    call_source = session.gen_dsp("test", [])
+    assert call_source != source
+    call_build = builds.run(call_source)
+    assert call_build != first and len(builds.runs) == 2
+    assert builds.run(call_source) == call_build
     assert len(builds.runs) == 2
 
 

@@ -54,6 +54,18 @@ def domain_id() -> int:
     return domain
 
 
+def resource_lifetime() -> str:
+    """VTCM/HMX lease: a whole Session (default) or each completed kernel call.
+
+    This is a firmware/profile choice, independent of HLOS and DSP ISA. DSP
+    clock votes, resident DDR buffers and execution threads stay session-scoped.
+    """
+    lifetime = os.environ.get("TILELANG_HEXAGON_RESOURCE_LIFETIME", "session")
+    if lifetime not in ("session", "call"):
+        raise ValueError(f"TILELANG_HEXAGON_RESOURCE_LIFETIME is session or call, not {lifetime!r}")
+    return lifetime
+
+
 def cache_identity() -> dict:
     """Resolve before cache lookup, including the automatically selected device.
 
@@ -65,6 +77,7 @@ def cache_identity() -> dict:
     identity = {
         "hlos": hlos(),
         "domain": domain_id(),
+        "resource_lifetime": resource_lifetime(),
         "dsp_arch": sdk.dsp_arch,
         "sdk_root": sdk.sdk_root,
         "ndk_root": sdk.ndk_root,

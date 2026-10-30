@@ -50,7 +50,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from . import fastrpc
+from . import config, fastrpc
 from .device import DEVICE_LOCK
 
 # Seconds one call to the agent may take, its transfers included.
@@ -97,6 +97,8 @@ def _dispatch_source(calls: str) -> str:
     was not applied. The Session protocol serializes calls; semaphore handoffs
     retain arguments until completion and publish the kernel's status."""
     return f"""
+static constexpr bool tl_session_resources_per_call = {str(config.resource_lifetime() == "call").lower()};
+
 // Prevent kernel frames from being inlined into the FastRPC dispatcher.
 static __attribute__((noinline)) AEEResult tl_session_invoke(int kernel, void** a) {{
   switch (kernel) {{
@@ -105,10 +107,29 @@ static __attribute__((noinline)) AEEResult tl_session_invoke(int kernel, void** 
 }}
 
 static AEEResult tl_session_resources_open() {{
-{fastrpc.SKEL_OPEN}  return AEE_SUCCESS;
+{fastrpc.SKEL_RESOURCES_OPEN}  return AEE_SUCCESS;
 }}
 static void tl_session_resources_close() {{
-{fastrpc.SKEL_CLOSE}}}
+{fastrpc.SKEL_RESOURCES_CLOSE}}}
+
+static AEEResult tl_session_execution_open() {{
+  tl_power_vote();
+  return tl_session_resources_per_call ? AEE_SUCCESS : tl_session_resources_open();
+}}
+static void tl_session_execution_close() {{
+  if (!tl_session_resources_per_call) tl_session_resources_close();
+  tl_power_unvote();
+}}
+
+static AEEResult tl_session_execute(int kernel, void** args) {{
+  if (!tl_session_resources_per_call) return tl_session_invoke(kernel, args);
+  AEEResult status = tl_session_resources_open();
+  if (status == AEE_SUCCESS) status = tl_session_invoke(kernel, args);
+  // invoke has joined its workers and drained their DMA queues before return.
+  // Release even after an acquisition or kernel error, before reporting done.
+  tl_session_resources_close();
+  return status;
+}}
 
 // A session executes either on its FastRPC caller or one persistent thread.
 // HMX enable/disable must run on the same execution thread as the kernels.
@@ -122,19 +143,19 @@ static struct {{
 }} tl_session_dispatch;
 
 static void tl_session_worker(void*) {{
-  tl_session_dispatch.status = tl_session_resources_open();
+  tl_session_dispatch.status = tl_session_execution_open();
   qurt_sem_up(&tl_session_dispatch.done);
   if (tl_session_dispatch.status != AEE_SUCCESS) {{
-    tl_session_resources_close();
+    tl_session_execution_close();
     return;
   }}
   for (;;) {{
     qurt_sem_down(&tl_session_dispatch.go);
     if (tl_session_dispatch.stopping) break;
-    tl_session_dispatch.status = tl_session_invoke(tl_session_dispatch.kernel, tl_session_dispatch.args);
+    tl_session_dispatch.status = tl_session_execute(tl_session_dispatch.kernel, tl_session_dispatch.args);
     qurt_sem_up(&tl_session_dispatch.done);
   }}
-  tl_session_resources_close();
+  tl_session_execution_close();
 }}
 
 static AEEResult tl_session_join_worker() {{
@@ -153,8 +174,8 @@ static AEEResult tl_session_dispatch_open() {{
   qurt_thread_attr_t caller;
   if (qurt_thread_attr_get(qurt_thread_get_id(), &caller) != QURT_EOK) return AEE_EFAILED;
   if (caller.stack_size >= {fastrpc.PD_THREAD_STACK}) {{
-    AEEResult status = tl_session_resources_open();
-    if (status != AEE_SUCCESS) tl_session_resources_close();
+    AEEResult status = tl_session_execution_open();
+    if (status != AEE_SUCCESS) tl_session_execution_close();
     return status;
   }}
   tl_session_dispatch.stack = malloc({fastrpc.PD_THREAD_STACK});
@@ -185,7 +206,7 @@ static AEEResult tl_session_dispatch_open() {{
 }}
 
 static AEEResult tl_session_dispatch_run(int kernel, void** args) {{
-  if (!tl_session_dispatch.started) return tl_session_invoke(kernel, args);
+  if (!tl_session_dispatch.started) return tl_session_execute(kernel, args);
   tl_session_dispatch.kernel = kernel;
   tl_session_dispatch.args = args;
   qurt_sem_up(&tl_session_dispatch.go);
@@ -195,7 +216,7 @@ static AEEResult tl_session_dispatch_run(int kernel, void** args) {{
 
 static AEEResult tl_session_dispatch_close() {{
   if (!tl_session_dispatch.started) {{
-    tl_session_resources_close();
+    tl_session_execution_close();
     return AEE_SUCCESS;
   }}
   tl_session_dispatch.stopping = 1;
@@ -705,13 +726,20 @@ def lower_kernels(kernels, target="hexagon") -> list[tuple[str, str, list, list]
 
 
 class Session:
-    """Kernels sharing one FastRPC session and its resident buffers."""
+    """Kernels sharing one FastRPC session and its resident buffers.
+
+    TILELANG_HEXAGON_RESOURCE_LIFETIME=call limits VTCM/HMX ownership to each
+    kernel invocation. The default, session, retains them until close. DDR
+    buffers, execution threads and DSP clock votes live for the whole session.
+    Call-scoped resources do not provide preemption inside a long kernel.
+    """
 
     _port_seq = 0
 
     def __init__(self, kernels, *, target="hexagon", serial: str | None = None, verbose: bool = False, ready_timeout: float = 30.0):
         """``kernels``: (prim_func, out_idx) pairs, compiled into one skel for
         the DSP the target names."""
+        config.resource_lifetime()  # Reject invalid profiles before lowering.
         from tilelang.backend.target import determine_target
         from tilelang.hexagon.target import hexagon_arch
 
@@ -737,6 +765,7 @@ class Session:
         return session
 
     def _open(self, lowered, sdk, dsp_arch: str | None, serial: str | None, verbose: bool, ready_timeout: float) -> None:
+        config.resource_lifetime()  # Also cover of_lowered, before build/deploy.
         from .build import build_cmake_fastrpc
         from .config import device_serial, domain_id, hlos, remote_dir
         from .device import AdbConnection
