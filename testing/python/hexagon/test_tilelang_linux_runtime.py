@@ -314,6 +314,92 @@ def test_ssh_streams_binary_files_without_adb_or_sftp(monkeypatch, tmp_path):
     assert subprocess.run(["test", "-d", conn.workdir]).returncode == 0
 
 
+def test_ssh_transfer_timeout_is_captured_and_can_be_overridden(monkeypatch):
+    assert linux_runtime.LinuxConnection(ssh_host="board").transfer_timeout == 600
+    monkeypatch.setenv("TILELANG_HEXAGON_SSH_TRANSFER_TIMEOUT", "900")
+    conn = linux_runtime.LinuxConnection(ssh_host="board")
+    assert conn.transfer_timeout == 900
+    monkeypatch.setenv("TILELANG_HEXAGON_SSH_TRANSFER_TIMEOUT", "1800")
+    assert conn.transfer_timeout == 900
+    assert linux_runtime.LinuxConnection(ssh_host="board", transfer_timeout=0.5).transfer_timeout == 0.5
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf", "bad"])
+def test_invalid_ssh_transfer_timeout_is_rejected(monkeypatch, timeout):
+    monkeypatch.setenv("TILELANG_HEXAGON_SSH_TRANSFER_TIMEOUT", timeout)
+    with pytest.raises(ValueError, match="finite and positive"):
+        linux_runtime.LinuxConnection(ssh_host="board")
+    with pytest.raises(ValueError, match="finite and positive"):
+        linux_runtime.LinuxConnection(ssh_host="board", transfer_timeout=timeout)
+
+
+def _blocked_ssh(pid_file):
+    """A real subprocess that records its PID, emits partial data and stalls."""
+    import sys
+
+    return [
+        sys.executable,
+        "-c",
+        "import os, sys, time; from pathlib import Path; "
+        f"Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+        "sys.stdout.buffer.write(b'partial'); sys.stdout.buffer.flush(); time.sleep(60)",
+    ]
+
+
+@pytest.mark.parametrize("stage", ["mkdir", "upload"])
+def test_blocked_ssh_deployment_times_out_and_releases_session_lock(monkeypatch, tmp_path, stage):
+    import fcntl
+    import subprocess
+    from tilelang.hexagon.runtime import session
+
+    monkeypatch.setenv("TILELANG_HEXAGON_HLOS", "linux")
+    lock_path = tmp_path / "device.lock"
+    monkeypatch.setenv("TILELANG_HEXAGON_DEVICE_LOCK", str(lock_path))
+    lock = device.DeviceLock()
+    monkeypatch.setattr(session, "DEVICE_LOCK", lock)
+    source = tmp_path / "skel.so"
+    source.write_bytes(b"skel")
+    pid_file = tmp_path / "blocked.pid"
+    conn = linux_runtime.LinuxConnection(workdir=str(tmp_path / "private"), ssh_host="local-test", transfer_timeout=1)
+
+    def shell_argv(command):
+        blocked = command.startswith("mkdir -p") if stage == "mkdir" else command.startswith("cat >")
+        return _blocked_ssh(pid_file) if blocked else ["sh", "-c", command]
+
+    monkeypatch.setattr(conn, "_shell_argv", shell_argv)
+    monkeypatch.setattr(linux_runtime.LinuxConnection, "from_environment", classmethod(lambda *args: conn))
+    monkeypatch.setattr(build, "build_cmake_fastrpc", lambda *a, **kw: build.FastRPCArtifacts(str(source), agent_exe=str(source)))
+    with pytest.raises(subprocess.TimeoutExpired) as timed_out:
+        session.Session.of_lowered([], sdk=FakeSDK())
+    assert timed_out.value.timeout == 1
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
+    assert not Path(conn.workdir).exists()
+    assert not conn._workdir_attempted
+    assert lock._depth == 0 and lock._fd is None
+    with lock_path.open("rb") as fd:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_blocked_ssh_download_preserves_destination_and_removes_staging(monkeypatch, tmp_path):
+    import subprocess
+
+    local = tmp_path / "downloads"
+    local.mkdir()
+    destination = local / "result"
+    destination.write_bytes(b"completed previous result")
+    pid_file = tmp_path / "blocked.pid"
+    conn = linux_runtime.LinuxConnection(ssh_host="local-test", transfer_timeout=1)
+    monkeypatch.setattr(conn, "_shell_argv", lambda command: _blocked_ssh(pid_file))
+    with pytest.raises(subprocess.TimeoutExpired) as timed_out:
+        conn.pull("/remote/model", str(destination))
+    assert timed_out.value.timeout == 1
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
+    assert destination.read_bytes() == b"completed previous result"
+    assert list(local.iterdir()) == [destination]
+
+
 @pytest.mark.parametrize("fails", [False, True])
 def test_ssh_tunnel_reports_ready_or_error_and_is_reaped(monkeypatch, fails):
     import subprocess
