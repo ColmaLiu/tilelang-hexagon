@@ -152,10 +152,10 @@ class AdbConnection(HexagonConnection):
         )
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
-    def _ensure_workdir(self) -> None:
+    def _ensure_workdir(self, timeout: float | None = None) -> None:
         if not self._ensured:
             self._workdir_attempted = True
-            rc, out = self.shell(f"mkdir -p {shlex.quote(self.workdir)}")
+            rc, out = self.shell(f"mkdir -p {shlex.quote(self.workdir)}", timeout=timeout)
             if rc:
                 raise HexagonConnectionError(f"Creating device workdir failed: {out}")
             self._ensured = True
