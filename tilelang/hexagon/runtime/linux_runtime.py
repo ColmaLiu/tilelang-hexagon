@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 from .device import DEVICE_LOCK, AdbConnection, HexagonConnectionError, _DEFAULT_ADSP_DIRS
-from .config import device_serial, remote_dir, ssh_host
+from .config import device_serial, remote_dir, ssh_host, ssh_transfer_timeout
 
 
 def build_linux_fastrpc(project_dir, name, sdk, dsp_arch, verbose):
@@ -60,14 +60,22 @@ def build_linux_fastrpc(project_dir, name, sdk, dsp_arch, verbose):
 
 @dataclass
 class LinuxConnection(AdbConnection):
-    """SSH files, commands and loopback tunnels, or ADB when SSH is unset."""
+    """SSH files, commands and loopback tunnels, or ADB when SSH is unset.
+
+    ``transfer_timeout`` bounds each SSH upload, download and deployment mkdir
+    in seconds. It defaults to TILELANG_HEXAGON_SSH_TRANSFER_TIMEOUT (600s),
+    captured on construction; larger model files may need a higher setting.
+    Persistent agents and their kernel calls have separate lifetime limits.
+    """
 
     workdir: str = field(default_factory=lambda: "/tmp/tilelang_hexagon/" + uuid.uuid4().hex)
     ssh_host: str | None = field(default_factory=ssh_host)
     known_hosts: str | None = field(default_factory=lambda: os.environ.get("TILELANG_HEXAGON_SSH_KNOWN_HOSTS"))
+    transfer_timeout: float | None = None
 
     def __post_init__(self):
         super().__post_init__()
+        self.transfer_timeout = ssh_transfer_timeout(self.transfer_timeout)
         self._tunnels = {}
 
     @classmethod
@@ -125,7 +133,7 @@ class LinuxConnection(AdbConnection):
     def push(self, local_path, remote_name=None):
         if not self.ssh_host:
             return super().push(local_path, remote_name)
-        self._ensure_workdir()
+        self._ensure_workdir(timeout=self.transfer_timeout)
         remote = os.path.join(self.workdir, remote_name or os.path.basename(local_path))
         # A shell stream works with BSPs that have no SFTP server or scp.
         with open(local_path, "rb") as src:
@@ -134,6 +142,7 @@ class LinuxConnection(AdbConnection):
                 env=self._transport_env,
                 stdin=src,
                 capture_output=True,
+                timeout=self.transfer_timeout,
             )
         if proc.returncode:
             raise HexagonConnectionError(f"SSH upload failed: {proc.stderr.decode(errors='replace')}")
@@ -152,6 +161,7 @@ class LinuxConnection(AdbConnection):
                     stdin=subprocess.DEVNULL,
                     stdout=dst,
                     stderr=subprocess.PIPE,
+                    timeout=self.transfer_timeout,
                 )
             if proc.returncode:
                 raise HexagonConnectionError(f"SSH download failed: {proc.stderr.decode(errors='replace')}")

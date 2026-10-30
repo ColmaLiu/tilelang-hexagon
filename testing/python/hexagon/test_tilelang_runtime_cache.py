@@ -157,6 +157,7 @@ def test_the_toolchain_is_part_of_the_key(builds, monkeypatch):
     # Neither the device lock nor runtime FastRPC domain changes a build.
     monkeypatch.setenv("TILELANG_HEXAGON_DOMAIN", "4")
     monkeypatch.setenv("TILELANG_HEXAGON_DEVICE_LOCK", "/tmp/lock")
+    monkeypatch.setenv("TILELANG_HEXAGON_SSH_TRANSFER_TIMEOUT", "1800")
     builds.run()
     assert len(builds.runs) == 2
 
@@ -266,3 +267,12 @@ def test_ssh_cache_identity_ignores_adb_and_tracks_host_keys(cache, monkeypatch)
     monkeypatch.setenv("TILELANG_HEXAGON_SSH_HOST", "")
     with pytest.raises(ValueError, match="nonempty SSH host"):
         key(cache)
+
+
+def test_ssh_transfer_timeout_changes_only_live_cache_identity(cache, monkeypatch):
+    monkeypatch.setenv("TILELANG_HEXAGON_SSH_HOST", "root@board")
+    original = key(cache)
+    monkeypatch.setenv("TILELANG_HEXAGON_SSH_TRANSFER_TIMEOUT", "600.0")
+    assert key(cache) == original
+    monkeypatch.setenv("TILELANG_HEXAGON_SSH_TRANSFER_TIMEOUT", "1800")
+    assert key(cache) != original

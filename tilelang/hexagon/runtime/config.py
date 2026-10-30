@@ -3,6 +3,7 @@ deployments: the one place the runtime reads its environment's settings."""
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 
@@ -32,6 +33,18 @@ def ssh_host() -> str | None:
     if host is not None and (not host or host.startswith("-") or any(c.isspace() for c in host)):
         raise ValueError("TILELANG_HEXAGON_SSH_HOST must be a nonempty SSH host or user@host")
     return host
+
+
+def ssh_transfer_timeout(value: float | None = None) -> float:
+    """Seconds per SSH file operation; raise the 600s default for large files."""
+    message = "TILELANG_HEXAGON_SSH_TRANSFER_TIMEOUT / transfer_timeout must be finite and positive"
+    try:
+        timeout = float(os.environ.get("TILELANG_HEXAGON_SSH_TRANSFER_TIMEOUT", "600") if value is None else value)
+    except (ValueError, TypeError):
+        raise ValueError(message) from None
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(message)
+    return timeout
 
 
 def device_serial() -> str | None:
@@ -79,6 +92,7 @@ def cache_identity() -> dict:
             "host": host,
             "ssh": shutil.which("ssh"),
             "known_hosts": os.environ.get("TILELANG_HEXAGON_SSH_KNOWN_HOSTS"),
+            "transfer_timeout": ssh_transfer_timeout(),
         }
     else:
         identity["transport"] = {
