@@ -1,6 +1,6 @@
 """Device sessions: several kernels and their resident buffers in one FastRPC session.
 
-A :class:`Session` holds one agent process on the phone and one FastRPC
+A :class:`Session` holds one agent process on the HLOS and one FastRPC
 session on the cDSP (one PD, one VTCM grant, one worker pool), with every
 kernel it was given built into one skel. Its :class:`DeviceBuffer` objects live
 in the session: rpcmem the agent maps into the DSP once (``fastrpc_mmap`` with
@@ -40,10 +40,10 @@ import select
 import shutil
 import socket
 import struct
-import subprocess
 import tempfile
 import time
 import weakref
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -51,7 +51,7 @@ import numpy as np
 import torch
 
 from . import fastrpc
-from .device import _DEFAULT_ADSP_DIRS, DEVICE_LOCK
+from .device import DEVICE_LOCK
 
 # Seconds one call to the agent may take, its transfers included.
 CALL_TIMEOUT = 600.0
@@ -202,7 +202,7 @@ AEEResult {iface}_run(remote_handle64 h, int32 kernel, const int32* args, int ar
 
 def gen_agent(iface: str) -> str:
     """The agent: one FastRPC session, its resident buffers, and a TCP socket
-    (reached through ``adb forward``) for the host's operations."""
+    (reached through the transport's loopback tunnel) for host operations."""
     return f"""// Auto-generated agent of a tilelang Hexagon session.
 #include <AEEStdErr.h>
 #include <remote.h>
@@ -221,6 +221,7 @@ def gen_agent(iface: str) -> str:
 #include "{iface}.h"
 
 static remote_handle64 g_handle = -1;
+static int g_domain = CDSP_DOMAIN_ID;
 
 static int read_full(int fd, void* buf, size_t n) {{
   size_t got = 0;
@@ -278,7 +279,7 @@ static int open_session(int domain_id) {{
 static void free_buffer(int id) {{
   if (id < 0 || id >= MAX_BUFFERS || !g_buffers[id].ptr) return;
   {iface}_release(g_handle, g_buffers[id].fd);
-  fastrpc_munmap(CDSP_DOMAIN_ID, g_buffers[id].fd, g_buffers[id].ptr, g_buffers[id].size);
+  fastrpc_munmap(g_domain, g_buffers[id].fd, g_buffers[id].ptr, g_buffers[id].size);
   rpcmem_free(g_buffers[id].ptr);
   g_buffers[id].ptr = 0;
 }}
@@ -324,7 +325,7 @@ static int serve(int cli, unsigned char op, int* running) {{
     if (id >= 0) {{
       uint8_t* p = (uint8_t*)rpcmem_alloc(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_FLAG_UNCACHED, (int)size);
       int fd = p ? rpcmem_to_fd(p) : -1;
-      if (!p || fd < 0 || fastrpc_mmap(CDSP_DOMAIN_ID, fd, p, 0, size, FASTRPC_MAP_FD) != 0) {{
+      if (!p || fd < 0 || fastrpc_mmap(g_domain, fd, p, 0, size, FASTRPC_MAP_FD) != 0) {{
         if (p) rpcmem_free(p);
         id = -1;
       }} else {{
@@ -384,7 +385,8 @@ static int serve(int cli, unsigned char op, int* running) {{
 int main(int argc, char** argv) {{
   // The port to listen on, 0 for one the kernel picks, which it reports.
   int port = (argc > 1) ? atoi(argv[1]) : 0;
-  if (open_session(CDSP_DOMAIN_ID) != 0) return 1;
+  if (argc > 2) g_domain = atoi(argv[2]);
+  if (open_session(g_domain) != 0) return 1;
   int srv = socket(AF_INET, SOCK_STREAM, 0);
   int opt = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
   struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
@@ -624,14 +626,11 @@ class Session:
 
     def _open(self, lowered, sdk, dsp_arch: str | None, serial: str | None, verbose: bool, ready_timeout: float) -> None:
         from .build import build_cmake_fastrpc
-        from .config import device_serial, hlos
+        from .config import device_serial, domain_id, hlos, remote_dir
+        from .device import AdbConnection
         from .env import HexagonSDK
 
         self._closed = True
-        if hlos() == "linux":
-            raise NotImplementedError(
-                "a session needs the Android agent; on a Linux BSP, tilelang.compile runs a kernel one call at a time"
-            )
         self.verbose = verbose
         # The session's FastRPC project and build tree, removed with it.
         self._workdir = tempfile.mkdtemp(prefix="tl_hexagon_session_")
@@ -640,8 +639,18 @@ class Session:
         sdk = (sdk or (HexagonSDK(dsp_arch=dsp_arch) if dsp_arch else HexagonSDK())).validate()
         self._artifacts = build_cmake_fastrpc(project, iface, sdk=sdk, dsp_arch=dsp_arch, verbose=verbose)
         self.kernels = [SessionKernel(self, i, name, params, out) for i, (name, _, params, out) in enumerate(lowered)]
-        self._serial = serial or device_serial()
-        self._base = ["adb"] + (["-s", self._serial] if self._serial else [])
+        self._domain = domain_id()
+        if hlos() == "linux":
+            from .linux_runtime import LinuxConnection
+
+            self._conn = LinuxConnection.from_environment(serial)
+        else:
+            Session._port_seq += 1
+            self._conn = AdbConnection(
+                serial=serial or device_serial(),
+                workdir=f"{remote_dir('android')}/session_{os.getpid()}_{Session._port_seq}",
+            )
+        self._device_dir = self._conn.workdir
         self._holds_device = DEVICE_LOCK.acquire()
         self._closed = False
         try:
@@ -653,25 +662,10 @@ class Session:
 
     # ---- lifecycle --------------------------------------------------------
     def _start(self, ready_timeout: float) -> None:
-        Session._port_seq += 1
-        from .config import remote_dir
-
-        self._device_dir = f"{remote_dir('android')}/session_{os.getpid()}_{Session._port_seq}"
-        subprocess.run(self._base + ["shell", f"mkdir -p {self._device_dir}"], check=True, capture_output=True)
         for local in (self._artifacts.dsp_skel, self._artifacts.agent_exe):
-            subprocess.run(self._base + ["push", local, f"{self._device_dir}/"], check=True, capture_output=True)
-        exe = os.path.basename(self._artifacts.agent_exe)
-        adsp = os.pathsep.join([self._device_dir, *_DEFAULT_ADSP_DIRS])
-        # The agent listens on a port the kernel picks, which it reports: the
-        # device refused a port the host had picked now and then ("bind:
-        # Operation not permitted", 3 of some 700 sessions in a regression),
-        # and another session may hold it. The command exits with the agent's
-        # status.
-        cmd = (
-            f"cd {self._device_dir} && chmod 755 {exe} && LD_LIBRARY_PATH={self._device_dir} ADSP_LIBRARY_PATH={adsp} "
-            f"./{exe} 0; status=$?; rm -rf {self._device_dir}; exit $status"
-        )
-        self._proc = subprocess.Popen(self._base + ["shell", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            self._conn.push(local)
+        exe = os.path.join(self._device_dir, os.path.basename(self._artifacts.agent_exe))
+        self._proc = self._conn.start_host_binary(exe, ["0", str(self._domain)])
         # select() keeps a silent agent from blocking past the deadline, and
         # the reads take what the pipe holds, unbuffered: a buffered readline
         # could leave AGENT_READY where select() does not see it. What the
@@ -691,10 +685,7 @@ class Session:
             ready, _, _ = select.select([self._proc.stdout], [], [], min(0.2, remaining))
             if ready:
                 printed += os.read(self._proc.stdout.fileno(), 4096)
-        done = subprocess.run(
-            self._base + ["forward", "tcp:0", f"tcp:{int(ready_line.group(1))}"], check=True, capture_output=True, text=True
-        )
-        self._host_port = int(done.stdout.split()[-1])
+        self._host_port = self._conn.forward_port(int(ready_line.group(1)))
         for _ in range(100):
             try:
                 self._sock = socket.create_connection(("127.0.0.1", self._host_port), timeout=2.0)
@@ -712,22 +703,50 @@ class Session:
         self._closed = True
         with contextlib.suppress(Exception):
             atexit.unregister(self.close)
-        if getattr(self, "_sock", None) is not None:
-            with contextlib.suppress(Exception):
-                self._sock.sendall(bytes([_OP_SHUTDOWN]))
-                self._sock.close()
-        if getattr(self, "_proc", None) is not None:
-            try:
-                self._proc.wait(timeout=10)
-            except Exception:
+        try:
+            shutdown_sent = False
+            if getattr(self, "_sock", None) is not None:
                 with contextlib.suppress(Exception):
-                    self._proc.terminate()
-            self._proc.stdout.close()
-        if getattr(self, "_host_port", None):
-            subprocess.run(self._base + ["forward", "--remove", f"tcp:{self._host_port}"], capture_output=True)
-        if self._holds_device:
-            self._holds_device = False
-            DEVICE_LOCK.release()
+                    self._sock.sendall(bytes([_OP_SHUTDOWN]))
+                    shutdown_sent = True
+                with contextlib.suppress(Exception):
+                    self._sock.close()
+            if getattr(self, "_proc", None) is not None:
+                # EOF also wakes the remote watchdog if no socket was opened.
+                if not shutdown_sent and self._proc.stdin is not None:
+                    with contextlib.suppress(Exception):
+                        self._proc.stdin.close()
+                try:
+                    self._proc.wait(timeout=10)
+                except Exception:
+                    if self._proc.stdin is not None:
+                        with contextlib.suppress(Exception):
+                            self._proc.stdin.close()
+                    with contextlib.suppress(Exception):
+                        self._proc.terminate()
+                        self._proc.wait(timeout=5)
+                    if self._proc.poll() is None:
+                        with contextlib.suppress(Exception):
+                            self._proc.kill()
+                            self._proc.wait()
+                if self._proc.stdin is not None:
+                    with contextlib.suppress(Exception):
+                        self._proc.stdin.close()
+                with contextlib.suppress(Exception):
+                    self._proc.stdout.close()
+            if getattr(self, "_host_port", None):
+                with contextlib.suppress(Exception):
+                    self._conn.remove_forward(self._host_port)
+            try:
+                self._conn.cleanup()
+            except Exception as error:
+                # A lost network can prevent immediate remote removal, but
+                # must never keep the host device lock held or hide startup's error.
+                warnings.warn(f"Hexagon session cleanup failed: {error}", RuntimeWarning, stacklevel=2)
+        finally:
+            if self._holds_device:
+                self._holds_device = False
+                DEVICE_LOCK.release()
 
     def __enter__(self):
         return self

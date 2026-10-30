@@ -3,7 +3,7 @@ kernels' sources (``SKEL_OPEN``, ``SKEL_CLOSE``), the PD's setup, the kernel
 status, and the CMakeLists. A session's project (:mod:`.session`) builds its
 skel and agent with them.
 
-On a Linux BSP, where there is no agent, a kernel's own project
+For one-shot BSP bring-up, a kernel's own project
 (:func:`write_project`) adds an IDL with the kernel's buffers and a one-shot
 host driver that runs one call (:class:`~.linux_runtime.OneShotKernel`).
 Buffers cross the FastRPC boundary as ``sequence<uint8>`` (``in`` for inputs,
@@ -265,7 +265,7 @@ def gen_host(iface: str, plans: list[BufferPlan]) -> str:
 
 def gen_cmake(iface: str, template_dir: str, agent: bool) -> str:
     # The DSP skel (skel + impl, compiled with HVX/HMX enabled) and, for a
-    # session, its Android agent (stub + agent). ``template_dir`` is the parent
+    # session, its HLOS agent (stub + agent). ``template_dir`` is the parent
     # of ``tl_templates`` so the kernel's <tl_templates/hexagon/...> include
     # resolves (as nvcc/hipcc get -I TILELANG_TEMPLATE_PATH). A Linux BSP builds
     # its host driver itself (linux_build.py).

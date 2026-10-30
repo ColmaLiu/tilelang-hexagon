@@ -65,6 +65,7 @@ def test_session_kernels_lower_once(tmp_path, monkeypatch):
     from tilelang.env import env
 
     monkeypatch.setenv("TILELANG_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(tmp_path))
     monkeypatch.delenv("TILELANG_DISABLE_CACHE", raising=False)
     calls = []
     lower = tilelang.lower
@@ -103,30 +104,37 @@ def test_session_skel_dispatches_by_kernel():
 def test_session_agent_maps_buffers_into_the_dsp_once():
     agent = session.gen_agent("tl_session_x")
     assert "rpcmem_alloc(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_FLAG_UNCACHED" in agent
-    assert "fastrpc_mmap(CDSP_DOMAIN_ID, fd, p, 0, size, FASTRPC_MAP_FD)" in agent
+    assert "fastrpc_mmap(g_domain, fd, p, 0, size, FASTRPC_MAP_FD)" in agent
 
 
 class _LocalAgent:
-    """adb for a session whose agent is a local shell command."""
-
-    PIPE, STDOUT = subprocess.PIPE, subprocess.STDOUT
+    """A session transport whose agent is a local shell command."""
 
     def __init__(self, agent):
         self.agent = agent
 
-    def run(self, argv, **kwargs):
-        return SimpleNamespace(stdout="1234\n")
+    def push(self, local):
+        return local
 
-    def Popen(self, argv, **kwargs):
-        return subprocess.Popen(["sh", "-c", self.agent], **kwargs)
+    def start_host_binary(self, exe, args):
+        return subprocess.Popen(["sh", "-c", self.agent], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    def forward_port(self, port):
+        return 1234
+
+    def remove_forward(self, port):
+        pass
+
+    def cleanup(self):
+        pass
 
 
 def _start(monkeypatch, agent):
-    monkeypatch.setattr(session, "subprocess", _LocalAgent(agent))
     sock = SimpleNamespace(setsockopt=lambda *args: None, settimeout=lambda timeout: None)
     monkeypatch.setattr(session, "socket", SimpleNamespace(create_connection=lambda *args, **kwargs: sock, IPPROTO_TCP=0, TCP_NODELAY=0))
     s = session.Session.__new__(session.Session)
-    s._base, s._closed, s._holds_device = ["adb"], False, False
+    s._conn, s._closed, s._holds_device = _LocalAgent(agent), False, False
+    s._device_dir, s._domain = "/tmp/session", 3
     s._artifacts = SimpleNamespace(dsp_skel="skel.so", agent_exe="agent")
     try:
         s._start(5.0)
@@ -189,7 +197,7 @@ def test_a_buffer_loads_a_range_of_a_device_file(sess, tmp_path):
     data = torch.randn(4 * N)
     (tmp_path / "data.bin").write_bytes(data.numpy().tobytes())
     path = f"{sess._device_dir}/data.bin"
-    subprocess.run(sess._base + ["push", str(tmp_path / "data.bin"), path], check=True, capture_output=True)
+    sess._conn.push(str(tmp_path / "data.bin"), "data.bin")
     buf = sess.buffer(3 * N * 4)
     buf.write(torch.full((3 * N,), 7.0))
     x = torch.randn(N)
