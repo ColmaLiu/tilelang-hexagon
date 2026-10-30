@@ -196,7 +196,15 @@ TL_DEVICE HVX_Vector tl_hvx_log2_vsf(HVX_Vector x) {
 }
 
 TL_DEVICE HVX_Vector tl_hvx_log_vsf(HVX_Vector x) {
-  return tl_hvx_mul_sf(tl_hvx_log2_vsf(x), tl_hvx_splat_f(0.6931471805599453f));
+  HVX_Vector r = tl_hvx_log2_vsf(x);
+  HVX_Vector magnitude = Q6_V_vand_VV(r, tl_hvx_bits(0x7fffffff));
+  HVX_VectorPred nonfinite =
+      Q6_Q_vcmp_gt_VwVw(magnitude, tl_hvx_bits(0x7f7fffff));
+  // Older qfloat arithmetic treats Inf/NaN bit patterns as finite numbers.
+  // Keep log2's classification and only scale finite lanes by ln(2).
+  HVX_Vector finite = tl_hvx_select(nonfinite, Q6_V_vzero(), r);
+  return tl_hvx_select(
+      nonfinite, r, tl_hvx_mul_sf(finite, tl_hvx_splat_f(0.6931471805599453f)));
 }
 
 // The Newton-Raphson seed overflows for subnormals, so those are scaled by

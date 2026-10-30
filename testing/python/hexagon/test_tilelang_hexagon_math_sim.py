@@ -34,7 +34,14 @@ def _inputs():
     # one on both sides. Cancellation near one amplifies a lost input ulp.
     device = np.logspace(-6, 6, 4096, dtype=np.float64).astype(np.float32)
     near_one = np.arange(0x3F800000 - 32768, 0x3F800000 + 32769, dtype=np.uint32).view(np.float32)
-    log = np.concatenate([device, near_one])
+    # Accurate log/log2 must preserve classification after the final scale:
+    # signed zero -> -inf, +inf -> +inf, negative inputs and NaNs -> NaN.
+    # Include quiet/signalling NaNs of either sign, without requiring payloads.
+    specials = np.array(
+        [0, 0x80000000, 0xBF800000, 0x7F800000, 0xFF800000, 0x7FC00000, 0xFFC00000, 0x7F800001, 0xFF800001],
+        dtype=np.uint32,
+    ).view(np.float32)
+    log = np.concatenate([device, near_one, specials])
     np.random.default_rng(73).shuffle(log)
     log = np.pad(log, (0, (-len(log)) % 32), constant_values=1).astype("<f4")
 
@@ -115,7 +122,22 @@ def test_hvx_math_accuracy_on_simulator(arch, tmp_path):
     for name, actual, reference, fast in zip(
         ["log", "log2", "log_fast", "log2_fast"], results, [np.log, np.log2, np.log, np.log2], [False, False, True, True]
     ):
-        _check_error(f"{arch} {name}", actual, reference(log.astype(np.float64)), "rel", 3e-5 if fast else 1e-6, 1e-4 if fast else 1e-5)
+        supported = np.isfinite(log) & (log > 0)
+        _check_error(
+            f"{arch} {name}",
+            actual[supported],
+            reference(log[supported].astype(np.float64)),
+            "rel",
+            3e-5 if fast else 1e-6,
+            1e-4 if fast else 1e-5,
+        )
+        if not fast:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                expected = reference(log[~supported].astype(np.float64))
+            special = actual[~supported]
+            np.testing.assert_array_equal(np.isnan(special), np.isnan(expected))
+            np.testing.assert_array_equal(np.isinf(special), np.isinf(expected))
+            np.testing.assert_array_equal(np.signbit(special[np.isinf(expected)]), np.signbit(expected[np.isinf(expected)]))
 
     for name, values, reference, kind, bound in zip(
         ["exp_fast_hf", "exp2_fast_hf", "sigmoid_fast_hf"],
