@@ -92,12 +92,125 @@ def gen_idl(iface: str) -> str:
     )
 
 
+def _dispatch_source(calls: str) -> str:
+    """Keep large kernel frames off a FastRPC thread whose requested stack
+    was not applied. The Session protocol serializes calls; semaphore handoffs
+    retain arguments until completion and publish the kernel's status."""
+    return f"""
+// Prevent kernel frames from being inlined into the FastRPC dispatcher.
+static __attribute__((noinline)) AEEResult tl_session_invoke(int kernel, void** a) {{
+  switch (kernel) {{
+{calls}  default: return AEE_EBADPARM;
+  }}
+}}
+
+static AEEResult tl_session_resources_open() {{
+{fastrpc.SKEL_OPEN}  return AEE_SUCCESS;
+}}
+static void tl_session_resources_close() {{
+{fastrpc.SKEL_CLOSE}}}
+
+// A session executes either on its FastRPC caller or one persistent thread.
+// HMX enable/disable must run on the same execution thread as the kernels.
+static struct {{
+  qurt_thread_t thread;
+  qurt_sem_t go, done;
+  void* stack;
+  int started, stopping, kernel;
+  void** args;
+  AEEResult status;
+}} tl_session_dispatch;
+
+static void tl_session_worker(void*) {{
+  tl_session_dispatch.status = tl_session_resources_open();
+  qurt_sem_up(&tl_session_dispatch.done);
+  if (tl_session_dispatch.status != AEE_SUCCESS) {{
+    tl_session_resources_close();
+    return;
+  }}
+  for (;;) {{
+    qurt_sem_down(&tl_session_dispatch.go);
+    if (tl_session_dispatch.stopping) break;
+    tl_session_dispatch.status = tl_session_invoke(tl_session_dispatch.kernel, tl_session_dispatch.args);
+    qurt_sem_up(&tl_session_dispatch.done);
+  }}
+  tl_session_resources_close();
+}}
+
+static AEEResult tl_session_join_worker() {{
+  int status;
+  // Never free a stack whose thread has not been joined successfully.
+  if (qurt_thread_join(tl_session_dispatch.thread, &status) != QURT_EOK) return AEE_EFAILED;
+  tl_session_dispatch.started = 0;
+  qurt_sem_destroy(&tl_session_dispatch.go);
+  qurt_sem_destroy(&tl_session_dispatch.done);
+  free(tl_session_dispatch.stack);
+  tl_session_dispatch.stack = 0;
+  return AEE_SUCCESS;
+}}
+
+static AEEResult tl_session_dispatch_open() {{
+  qurt_thread_attr_t caller;
+  if (qurt_thread_attr_get(qurt_thread_get_id(), &caller) != QURT_EOK) return AEE_EFAILED;
+  if (caller.stack_size >= {fastrpc.PD_THREAD_STACK}) {{
+    AEEResult status = tl_session_resources_open();
+    if (status != AEE_SUCCESS) tl_session_resources_close();
+    return status;
+  }}
+  tl_session_dispatch.stack = malloc({fastrpc.PD_THREAD_STACK});
+  if (!tl_session_dispatch.stack) return AEE_ENOMEMORY;
+  tl_session_dispatch.stopping = 0;
+  qurt_sem_init_val(&tl_session_dispatch.go, 0);
+  qurt_sem_init_val(&tl_session_dispatch.done, 0);
+  qurt_thread_attr_t worker;
+  qurt_thread_attr_init(&worker);
+  qurt_thread_attr_set_stack_addr(&worker, tl_session_dispatch.stack);
+  qurt_thread_attr_set_stack_size(&worker, {fastrpc.PD_THREAD_STACK});
+  qurt_thread_attr_set_priority(&worker, caller.priority);
+  if (qurt_thread_create(&tl_session_dispatch.thread, &worker, tl_session_worker, 0) != QURT_EOK) {{
+    qurt_sem_destroy(&tl_session_dispatch.go);
+    qurt_sem_destroy(&tl_session_dispatch.done);
+    free(tl_session_dispatch.stack);
+    tl_session_dispatch.stack = 0;
+    return AEE_EFAILED;
+  }}
+  tl_session_dispatch.started = 1;
+  qurt_sem_down(&tl_session_dispatch.done);
+  AEEResult status = tl_session_dispatch.status;
+  if (status != AEE_SUCCESS) {{
+    AEEResult joined = tl_session_join_worker();
+    if (joined != AEE_SUCCESS) return joined;
+  }}
+  return status;
+}}
+
+static AEEResult tl_session_dispatch_run(int kernel, void** args) {{
+  if (!tl_session_dispatch.started) return tl_session_invoke(kernel, args);
+  tl_session_dispatch.kernel = kernel;
+  tl_session_dispatch.args = args;
+  qurt_sem_up(&tl_session_dispatch.go);
+  qurt_sem_down(&tl_session_dispatch.done);
+  return tl_session_dispatch.status;
+}}
+
+static AEEResult tl_session_dispatch_close() {{
+  if (!tl_session_dispatch.started) {{
+    tl_session_resources_close();
+    return AEE_SUCCESS;
+  }}
+  tl_session_dispatch.stopping = 1;
+  qurt_sem_up(&tl_session_dispatch.go);
+  return tl_session_join_worker();
+}}
+"""
+
+
 def gen_dsp(iface: str, kernels: Sequence[tuple[str, str, list]]) -> str:
     """The skel of `kernels`, (name, source, plans) each: one translation unit,
     every kernel's entry renamed to its index."""
     parts = [
         "// Auto-generated FastRPC skel of a tilelang Hexagon session.\n",
-        "#include <AEEStdErr.h>\n#include <HAP_mem.h>\n#include <qurt.h>\n#include <stdint.h>\n#include <type_traits>\n",
+        "#include <AEEStdErr.h>\n#include <HAP_mem.h>\n#include <qurt.h>\n#include <stdint.h>\n#include <stdlib.h>\n#include <type_traits>\n",
         f'#include "{iface}.h"\n\n',
         fastrpc.SKEL_INCLUDES,
     ]
@@ -112,6 +225,7 @@ def gen_dsp(iface: str, kernels: Sequence[tuple[str, str, list]]) -> str:
         )
     calls = "".join(f"  case {i}: return tl_session_call_{i}(a);\n" for i in range(len(kernels)))
     max_params = max([len(plans) for _, _, plans in kernels] + [1])
+    parts.append(_dispatch_source(calls))
     parts.append(f"""
 // The DSP address of each resident buffer, by its fd.
 #define TL_SESSION_MAPS 256
@@ -136,7 +250,7 @@ extern "C" {{
 
 AEEResult {iface}_open(const char* uri, remote_handle64* h) {{
   (void)uri; *h = 0;
-{fastrpc.SKEL_OPEN}  return AEE_SUCCESS;
+  return tl_session_dispatch_open();
 }}
 
 AEEResult {iface}_release(remote_handle64 h, int32 fd) {{
@@ -153,7 +267,7 @@ AEEResult {iface}_release(remote_handle64 h, int32 fd) {{
 AEEResult {iface}_close(remote_handle64 h) {{
   (void)h;
   while (tl_session_nmaps > 0) {{ HAP_mmap_put(tl_session_maps[tl_session_nmaps - 1].fd); --tl_session_nmaps; }}
-{fastrpc.SKEL_CLOSE}  return AEE_SUCCESS;
+  return tl_session_dispatch_close();
 }}
 
 AEEResult {iface}_sync(remote_handle64 h, int32 fd, uint32 offset, uint32 size, int32 writeback) {{
@@ -188,9 +302,7 @@ AEEResult {iface}_run(remote_handle64 h, int32 kernel, const int32* args, int ar
       a[i] = (void*)(intptr_t)v;
     }}
   }}
-  switch (kernel) {{
-{calls}  default: return AEE_EBADPARM;
-  }}
+  return tl_session_dispatch_run(kernel, a);
 }}
 
 #ifdef __cplusplus

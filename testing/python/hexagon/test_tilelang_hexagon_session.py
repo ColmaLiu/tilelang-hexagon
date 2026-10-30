@@ -1,6 +1,8 @@
 """Device sessions: several kernels sharing resident buffers in one FastRPC session."""
 
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import time
 from types import SimpleNamespace
@@ -105,6 +107,27 @@ def test_session_agent_maps_buffers_into_the_dsp_once():
     agent = session.gen_agent("tl_session_x")
     assert "rpcmem_alloc(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_FLAG_UNCACHED" in agent
     assert "fastrpc_mmap(g_domain, fd, p, 0, size, FASTRPC_MAP_FD)" in agent
+
+
+def test_session_dispatch_lifecycle_on_host(tmp_path, monkeypatch):
+    compiler = shutil.which("c++")
+    if compiler is None:
+        pytest.skip("a host C++ compiler is required for the dispatch lifecycle test")
+    # Exercise the generated implementation with real host synchronization.
+    # This checks resource ownership/error cleanup, not DSP stack capacity.
+    monkeypatch.setattr(fastrpc, "SKEL_OPEN", "  return resources_open();\n")
+    monkeypatch.setattr(fastrpc, "SKEL_CLOSE", "  resources_close();\n")
+    dispatch = session._dispatch_source("  case 0: return test_kernel(a);\n")
+    harness = Path(__file__).with_name("session_dispatch_host.cc").read_text()
+    source, executable = tmp_path / "dispatch.cc", tmp_path / "dispatch"
+    source.write_text(harness.replace("// GENERATED_DISPATCH", dispatch))
+    subprocess.run([compiler, "-std=c++17", "-O2", "-pthread", str(source), "-o", str(executable)], check=True, timeout=30)
+    for mode, failures in [
+        ("direct", ["none", "query", "resources"]),
+        ("worker", ["none", "query", "allocate", "create", "resources", "join"]),
+    ]:
+        for failure in failures:
+            subprocess.run([str(executable), mode, failure], check=True, timeout=10)
 
 
 class _LocalAgent:
@@ -242,6 +265,28 @@ def test_a_kernel_has_a_deep_stack():
         (k_deep,) = s.kernels
         x = torch.randn(N)
         torch.testing.assert_close(k_deep(x), 4 * x)
+
+
+@DEVICE
+def test_a_kernel_has_the_requested_execution_stack():
+    from tilelang.engine.param import KernelParam
+
+    source = """#include <stdint.h>
+#include <qurt.h>
+int32_t stack_info(int32_t* out) {
+  qurt_thread_attr_t attr;
+  if (qurt_thread_attr_get(qurt_thread_get_id(), &attr) != QURT_EOK) return 1;
+  out[0] = attr.stack_size;
+  out[1] = (intptr_t)attr.stack_addr;
+  out[2] = (intptr_t)&attr;
+  return 0;
+}
+"""
+    with session.Session.of_lowered([("stack_info", source, [KernelParam("int32", [3])], [0])]) as s:
+        size, base, local = s.kernels[0]().tolist()
+        # Check the execution thread, not the host's accepted stack request.
+        assert size >= fastrpc.PD_THREAD_STACK
+        assert base & 0xFFFFFFFF <= local & 0xFFFFFFFF < (base & 0xFFFFFFFF) + size
 
 
 @DEVICE
