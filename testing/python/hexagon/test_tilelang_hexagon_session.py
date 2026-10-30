@@ -109,14 +109,16 @@ def test_session_agent_maps_buffers_into_the_dsp_once():
     assert "fastrpc_mmap(g_domain, fd, p, 0, size, FASTRPC_MAP_FD)" in agent
 
 
-def test_session_dispatch_lifecycle_on_host(tmp_path, monkeypatch):
+@pytest.mark.parametrize("lifetime", ["session", "call"])
+def test_session_dispatch_lifecycle_on_host(tmp_path, monkeypatch, lifetime):
     compiler = shutil.which("c++")
     if compiler is None:
         pytest.skip("a host C++ compiler is required for the dispatch lifecycle test")
     # Exercise the generated implementation with real host synchronization.
     # This checks resource ownership/error cleanup, not DSP stack capacity.
-    monkeypatch.setattr(fastrpc, "SKEL_OPEN", "  return resources_open();\n")
-    monkeypatch.setattr(fastrpc, "SKEL_CLOSE", "  resources_close();\n")
+    monkeypatch.setenv("TILELANG_HEXAGON_RESOURCE_LIFETIME", lifetime)
+    monkeypatch.setattr(fastrpc, "SKEL_RESOURCES_OPEN", "  return resources_open();\n")
+    monkeypatch.setattr(fastrpc, "SKEL_RESOURCES_CLOSE", "  resources_close();\n")
     dispatch = session._dispatch_source("  case 0: return test_kernel(a);\n")
     harness = Path(__file__).with_name("session_dispatch_host.cc").read_text()
     source, executable = tmp_path / "dispatch.cc", tmp_path / "dispatch"
@@ -128,6 +130,16 @@ def test_session_dispatch_lifecycle_on_host(tmp_path, monkeypatch):
     ]:
         for failure in failures:
             subprocess.run([str(executable), mode, failure], check=True, timeout=10)
+
+
+@pytest.mark.parametrize("value", ["", "CALL", "per_call", "session "])
+def test_invalid_resource_lifetime_fails_before_lowering_or_build(monkeypatch, value):
+    monkeypatch.setenv("TILELANG_HEXAGON_RESOURCE_LIFETIME", value)
+    monkeypatch.setattr(session, "lower_kernels", lambda *args: pytest.fail("must reject before lowering"))
+    monkeypatch.setattr(session, "write_project", lambda *args: pytest.fail("must reject before building"))
+    for create in (session.Session, session.Session.of_lowered):
+        with pytest.raises(ValueError, match="TILELANG_HEXAGON_RESOURCE_LIFETIME"):
+            create([])
 
 
 class _LocalAgent:
