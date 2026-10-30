@@ -34,6 +34,7 @@ import contextlib
 import functools
 import hashlib
 import json
+import operator
 import os
 import re
 import select
@@ -52,6 +53,8 @@ import torch
 
 from . import config, fastrpc
 from .device import DEVICE_LOCK
+from . import sequence
+from .sequence import Copy, Run, SequenceError, SequenceResult, SequenceTiming  # noqa: F401
 
 # Seconds one call to the agent may take, its transfers included.
 CALL_TIMEOUT = 600.0
@@ -67,6 +70,7 @@ _OP_CLOSE, _OP_RUN, _OP_SHUTDOWN, _OP_ALLOC, _OP_FREE, _OP_WRITE, _OP_READ, _OP_
 
 # Inline arguments start on register boundaries, as kernels assume.
 _ALIGN = 128
+_MAX_BUFFERS = 256
 
 _KERNEL_RE = re.compile(r"^\s*(?:void|int|int32_t)\s+(\w+)\s*\(", re.MULTILINE)
 
@@ -300,8 +304,8 @@ AEEResult {iface}_sync(remote_handle64 h, int32 fd, uint32 offset, uint32 size, 
   // before it writes them, they go there too and the DSP's copies go. A dirty
   // line left behind would overwrite the host's bytes when evicted, and an
   // invalidate on its own writes dirty lines back.
-  qurt_mem_cache_clean((qurt_addr_t)(base + offset), size, writeback ? QURT_MEM_CACHE_FLUSH : QURT_MEM_CACHE_FLUSH_INVALIDATE, QURT_MEM_DCACHE);
-  return AEE_SUCCESS;
+  int rc = qurt_mem_cache_clean((qurt_addr_t)(base + offset), size, writeback ? QURT_MEM_CACHE_FLUSH : QURT_MEM_CACHE_FLUSH_INVALIDATE, QURT_MEM_DCACHE);
+  return rc == QURT_EOK ? AEE_SUCCESS : AEE_EFAILED;
 }}
 
 AEEResult {iface}_run(remote_handle64 h, int32 kernel, const int32* args, int argsLen, const uint8* inputs, int inputsLen, uint8* outputs, int outputsLen) {{
@@ -333,7 +337,7 @@ AEEResult {iface}_run(remote_handle64 h, int32 kernel, const int32* args, int ar
     return "".join(parts)
 
 
-def gen_agent(iface: str) -> str:
+def gen_agent(iface: str, kernels=()) -> str:
     """The agent: one FastRPC session, its resident buffers, and a TCP socket
     (reached through the transport's loopback tunnel) for host operations."""
     return f"""// Auto-generated agent of a tilelang Hexagon session.
@@ -379,8 +383,8 @@ static int reply(int fd, unsigned char status, const void* data, size_t n) {{
 }}
 
 // Resident buffers: rpcmem, uncached on the CPU, mapped into the DSP once.
-#define MAX_BUFFERS 256
-static struct {{ uint8_t* ptr; int fd; uint64_t size; }} g_buffers[MAX_BUFFERS];
+#define MAX_BUFFERS {_MAX_BUFFERS}
+static struct {{ uint8_t* ptr; int fd; uint64_t size, generation; }} g_buffers[MAX_BUFFERS];
 
 // The duration of the last run's FastRPC call.
 static int64_t g_last_run_ns;
@@ -417,10 +421,13 @@ static void free_buffer(int id) {{
   g_buffers[id].ptr = 0;
 }}
 
+{sequence.agent_source(iface, kernels)}
+
 // One operation of the host; nonzero ends the connection.
 static int serve(int cli, unsigned char op, int* running) {{
   if (op == {_OP_CLOSE}) return 1;
   if (op == {_OP_SHUTDOWN}) {{ *running = 0; return 1; }}
+  if (op == {sequence.OP_SEQUENCE}) return tl_serve_sequence(cli);
   if (op == {_OP_RUN}) {{
     int32_t head[3];  // kernel, number of args, inline output bytes
     if (read_full(cli, head, sizeof(head))) return 1;
@@ -464,6 +471,7 @@ static int serve(int cli, unsigned char op, int* running) {{
       }} else {{
         memset(p, 0, size);
         g_buffers[id].ptr = p; g_buffers[id].fd = fd; g_buffers[id].size = size;
+        ++g_buffers[id].generation;
       }}
     }}
     return write_full(cli, &id, 4);
@@ -559,7 +567,7 @@ def write_project(workdir: str, kernels: Sequence[tuple[str, str, list]]) -> tup
     files = {
         f"{iface}.idl": gen_idl(iface),
         f"{iface}_dsp.cc": gen_dsp(iface, kernels),
-        f"{iface}_agent.c": gen_agent(iface),
+        f"{iface}_agent.c": gen_agent(iface, kernels),
         "CMakeLists.txt": fastrpc.gen_cmake(iface, TILELANG_TEMPLATE_PATH, agent=True),
     }
     for fn, content in files.items():
@@ -574,6 +582,14 @@ def write_project(workdir: str, kernels: Sequence[tuple[str, str, list]]) -> tup
 
 
 @dataclass
+class _BufferAllocation:
+    id: int
+    nbytes: int
+    generation: int
+    alive: bool = True
+
+
+@dataclass
 class DeviceBuffer:
     """``nbytes`` of resident memory of a :class:`Session`, from ``offset``."""
 
@@ -581,35 +597,56 @@ class DeviceBuffer:
     id: int
     nbytes: int
     offset: int = 0
+    _allocation: _BufferAllocation | None = None
+
+    def _live_allocation(self) -> _BufferAllocation:
+        allocation = self._allocation
+        if (
+            allocation is None
+            or not allocation.alive
+            or allocation.id != self.id
+            or getattr(self.session, "_closed", True)
+            or getattr(self.session, "_allocations", {}).get(self.id) is not allocation
+        ):
+            raise ValueError("the resident buffer allocation is no longer live")
+        if self.offset < 0 or self.nbytes < 0 or self.offset > allocation.nbytes or self.nbytes > allocation.nbytes - self.offset:
+            raise ValueError("the resident buffer view is outside its allocation")
+        return allocation
 
     def at(self, offset: int, nbytes: int | None = None) -> DeviceBuffer:
         """The bytes from ``offset`` on, as an argument: a register boundary."""
+        allocation = self._live_allocation()
         if offset % _ALIGN:
             raise ValueError(f"a resident argument starts on a {_ALIGN}-byte boundary, not at {offset}")
         n = self.nbytes - offset if nbytes is None else nbytes
-        if offset < 0 or offset + n > self.nbytes:
+        if offset < 0 or n < 0 or offset + n > self.nbytes:
             raise ValueError(f"bytes [{offset}, {offset + n}) are not in a buffer of {self.nbytes}")
-        return DeviceBuffer(self.session, self.id, n, self.offset + offset)
+        return DeviceBuffer(self.session, self.id, n, self.offset + offset, allocation)
 
     def write(self, data, offset: int = 0) -> None:
         """Write a tensor's (or a byte string's) bytes at ``offset``."""
+        self._live_allocation()
         raw = _bytes(data)
-        if offset + len(raw) > self.nbytes:
+        if offset < 0 or offset + len(raw) > self.nbytes:
             raise ValueError(f"{len(raw)} bytes at {offset} overrun a buffer of {self.nbytes}")
         self.session._write(self.id, self.offset + offset, raw)
 
     def read(self, nbytes: int | None = None, offset: int = 0) -> bytes:
+        self._live_allocation()
         n = self.nbytes - offset if nbytes is None else nbytes
+        if offset < 0 or n < 0 or offset > self.nbytes or n > self.nbytes - offset:
+            raise ValueError("read range is outside its resident buffer view")
         return self.session._read(self.id, self.offset + offset, n)
 
     def load(self, device_path: str, start: int = 0) -> int:
         """Read the file at ``device_path`` on the device, from byte ``start``
         on, into the buffer: as many bytes as the buffer holds, or as the file
         has past ``start``. Returns how many it read."""
+        self._live_allocation()
         return self.session._load(self.id, self.offset, self.nbytes, device_path, start)
 
     def free(self) -> None:
-        self.session._free(self.id)
+        self.session._free(self.id, self._live_allocation())
 
 
 def _bytes(data) -> bytes:
@@ -732,6 +769,8 @@ class Session:
     kernel invocation. The default, session, retains them until close. DDR
     buffers, execution threads and DSP clock votes live for the whole session.
     Call-scoped resources do not provide preemption inside a long kernel.
+    Calls on one Session must be serialized; its socket protocol is not
+    thread-safe, including buffer operations and run_sequence.
     """
 
     _port_seq = 0
@@ -772,6 +811,8 @@ class Session:
         from .env import HexagonSDK
 
         self._closed = True
+        self._allocations = {}
+        self._buffer_generations = {}
         self.verbose = verbose
         # The session's FastRPC project and build tree, removed with it.
         self._workdir = tempfile.mkdtemp(prefix="tl_hexagon_session_")
@@ -842,6 +883,9 @@ class Session:
         if getattr(self, "_closed", True):
             return
         self._closed = True
+        for allocation in getattr(self, "_allocations", {}).values():
+            allocation.alive = False
+        self._allocations = {}
         with contextlib.suppress(Exception):
             atexit.unregister(self.close)
         try:
@@ -922,17 +966,43 @@ class Session:
         takes an int). Large buffers fragment the DSP's 4 GB of addresses: on
         a v79, seven of 512 MiB map and an eighth does not, while 3.5 GB of
         model weights map as a buffer per tensor, the largest first."""
+        try:
+            nbytes = operator.index(nbytes)
+        except TypeError:
+            raise ValueError("a resident buffer size must be an integer") from None
         if not 0 < nbytes < 1 << 31:
             raise ValueError(f"a resident buffer holds 1 byte to 2 GiB - 1, not {nbytes}")
-        self._sock.sendall(bytes([_OP_ALLOC]) + struct.pack("<Q", nbytes))
-        (bid,) = struct.unpack("<i", self._recv(4))
+        if self._closed:
+            raise ValueError("the Hexagon session is closed")
+        request = bytes([_OP_ALLOC]) + struct.pack("<Q", nbytes)
+        try:
+            self._sock.sendall(request)
+            (bid,) = struct.unpack("<i", self._recv(4))
+        except BaseException:
+            # An allocation reply lost in transit leaves generation counters
+            # unsynchronized. Do not retry on this session.
+            self.close()
+            raise
         if bid < 0:
             raise RuntimeError(f"Hexagon session: could not allocate and map {nbytes} bytes")
+        if bid >= _MAX_BUFFERS or bid in self._allocations:
+            self.close()
+            raise RuntimeError("invalid Hexagon session allocation reply")
         # Freed by DeviceBuffer.free, or with the session.
-        return DeviceBuffer(self, bid, nbytes)
+        generation = self._buffer_generations.get(bid, 0) + 1
+        self._buffer_generations[bid] = generation
+        allocation = _BufferAllocation(bid, nbytes, generation)
+        self._allocations[bid] = allocation
+        return DeviceBuffer(self, bid, nbytes, _allocation=allocation)
 
-    def _free(self, bid: int) -> None:
-        self._sock.sendall(bytes([_OP_FREE]) + struct.pack("<i", bid))
+    def _free(self, bid: int, allocation: _BufferAllocation) -> None:
+        try:
+            self._sock.sendall(bytes([_OP_FREE]) + struct.pack("<i", bid))
+        except BaseException:
+            self.close()
+            raise
+        allocation.alive = False
+        del self._allocations[bid]
 
     def _write(self, bid: int, offset: int, raw: bytes) -> None:
         self._sock.sendall(bytes([_OP_WRITE]) + struct.pack("<iQQ", bid, offset, len(raw)) + raw)
@@ -959,6 +1029,29 @@ class Session:
         return ns * 1e-9
 
     # ---- runs -------------------------------------------------------------
+    def run_sequence(self, operations) -> SequenceResult:
+        """Execute a bounded, explicit Run/Copy list with one agent round trip.
+
+        All descriptors are validated before execution. A failed operation
+        stops the sequence and raises SequenceError with partial timings;
+        even the failed operation may have partial side effects. Effects
+        remain and are never replayed automatically.
+        Each Run retains the normal per-call DSP resource scope. Copies use
+        byte offsets, while Run buffer arguments remain 128-byte aligned.
+        """
+        if self._closed:
+            raise ValueError("the Hexagon session is closed")
+        operations, wire = sequence.encode(self, operations)
+        try:
+            self._sock.sendall(wire)
+            return sequence.receive(self, operations)
+        except SequenceError:
+            raise
+        except BaseException:
+            # Do not reuse a socket after a partial send or truncated reply.
+            self.close()
+            raise
+
     def _run(self, kernel: SessionKernel, given: list):
         args, inputs, outputs = [], bytearray(), []
         out_bytes = 0
@@ -969,6 +1062,7 @@ class Session:
             elif isinstance(value, DeviceBuffer):
                 if value.session is not self:
                     raise ValueError(f"argument {i} of {kernel.name} is a buffer of another session")
+                value._live_allocation()
                 if value.nbytes < plan.nbytes:
                     raise ValueError(f"argument {i} of {kernel.name} takes {plan.nbytes} bytes, its buffer has {value.nbytes}")
                 args += [_RESIDENT, value.id, value.offset]

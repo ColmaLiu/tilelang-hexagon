@@ -327,6 +327,30 @@ and explicit HMX atoms.
     host's bytes later; before a host read, it writes them back.
   - **Arguments.** Each parameter takes, per call, a `DeviceBuffer`, a tensor (copied
     inline) or an int32 scalar.
+  - **Resident sequences.** `Session.run_sequence` accepts an explicit, finite list
+    of `Run(kernel, args)` and `Copy(src, dst, nbytes, src_offset=0, dst_offset=0)`
+    descriptors, imported from `tilelang.hexagon.runtime.session`. It sends the list
+    in one round trip; the ARM agent invokes FastRPC separately for each Run, so
+    `resource_lifetime=call` still acquires/releases VTCM/HMX for each invocation.
+    Each Run supplies every parameter, using resident buffers and int32 scalars;
+    inline tensors are unsupported. A Run buffer remains 128-byte aligned and must
+    contain the kernel's full static extent. Copy uses arbitrary byte offsets
+    relative to its views, checks DSP cache synchronization, and supports overlap
+    via `memmove`. No loop, branch, automatic retry, or model logic is implicit.
+    Both Python and the agent validate the entire list before execution (at most
+    4096 operations and a 1 MiB encoded payload). `SequenceError` reports the failed
+    operation index, original unsigned status, failure stage, and partial result;
+    even the failed operation may have partial side effects. No effects are rolled
+    back. Validation failure executes nothing. Transport or
+    malformed-response errors close the Session because execution may be unknown.
+    `SequenceResult.runs` gives each attempted Run's operation/kernel indices and
+    ARM FastRPC nanoseconds; `arm_call_ns_sum` sums these. `board_wall_ns` times
+    execution of the entire sequence, including Copy and cache maintenance but
+    excluding validation, allocation, and the host round trip. A failed Run has a
+    timing entry but is excluded from `completed_operations`.
+    All Session operations must be serialized by the caller. Freeing any buffer
+    view invalidates every view of that allocation, even if the agent later reuses
+    its numeric ID. Closing the Session invalidates all buffers.
   - **Cost.** A call costs ~2.4 ms with resident arguments, of which the FastRPC call
     is 0.25–0.4 ms. `Session.last_run_seconds()` reports the agent's timing of the
     last call.
