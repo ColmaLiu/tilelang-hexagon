@@ -89,8 +89,8 @@ These are the decisions that keep the adaptation small and the code navigable.
   Crouton matrices), `hvx_gemm.h` and `hmx_gemm.h` (the GEMMs that are functions of
   their own), `worker.h` (the HW-thread pool).
 - **Layer 5** — `tilelang/hexagon/runtime/`: `session.py` builds kernels into one
-  skel and runs them through an agent on the phone that holds their FastRPC session
-  and device-resident buffers, over a socket (`adb forward`). A session can span up
+  skel and runs them through an Android or Linux agent that holds their FastRPC session
+  and device-resident buffers, over a socket forwarded by ADB or SSH. A session can span up
   to 4 DSP processes (`Session(..., processes=P)`), each with its own 4 GB of
   addresses: a buffer is mapped into the processes it names, and a kernel runs on
   the one it is called on. Each process caches its own lines of a buffer, so data
@@ -101,9 +101,15 @@ These are the decisions that keep the adaptation small and the code navigable.
   manager zeroes it when it does: about 72 µs for the 8 MiB on a v79, and this
   firmware does not let a client turn the zeroing off. `build.py`/`env.py`
   drive the Hexagon SDK build, and `fastrpc.py` holds the pieces of a project the
-  skels share. `adapter.py` is `tilelang.compile`'s: a compiled kernel is a session
-  of one. On a Linux BSP (`linux_runtime.py`), with no agent, a kernel runs one call
-  at a time through a host driver of its own.
+  skels share. `adapter.py` is `tilelang.compile`'s: on both Android and Linux, a
+  compiled kernel uses a resident session of one kernel. Android uses ADB; Linux
+  BSPs (`linux_runtime.py`) use SSH when `TILELANG_HEXAGON_SSH_HOST` is set, or ADB
+  otherwise. The Linux one-shot driver remains a compatibility path, not the
+  adapter's execution path. Each SSH file upload, download and deployment directory
+  creation has a 600-second timeout. Increase `TILELANG_HEXAGON_SSH_TRANSFER_TIMEOUT`
+  for large models or slow links, or pass `transfer_timeout` to `LinuxConnection`.
+  The value must be finite and positive; it is captured when the connection is
+  created. Changing it creates a new live adapter without rebuilding DSP binaries.
 
 ---
 
@@ -199,6 +205,36 @@ and explicit HMX atoms.
   separate row-major staging operation: the DMA descriptor can move
   contiguous/row-strided rectangles but cannot express the Crouton permutation.
 
+- **Q4 scale specialization.** HMX `T.gemm_blockscaled` accepts
+  `annotations={"hexagon.normal_scales": True}` when the caller has established
+  that every B scale used by the call is a finite, normal fp16 value. This is a
+  compile-time promise, not a runtime check: v79 uses its original qf16 fast
+  path. Without the annotation, the dequantizer rounds integer × finite half
+  products to half exactly, including zero and subnormal scales. Neither path
+  scans scales during a GEMM. The LFM quantizer records the classification of
+  the stored fp16 scales as optional `normal_scales` metadata, retained in a
+  header-only copy. Older full bundles are classified once before compiling
+  prefill; older header-only bundles without metadata use the general path.
+  Existing bundles remain readable. IEEE half arithmetic is enabled locally
+  only on device-validated v73; other older architectures use integer
+  dequantization. The v79 general path isolates each block in a noinline leaf
+  so the supported toolchain can schedule its qfloat intrinsics without
+  spilling qfloat intermediates. The normal path remains inlined. Exhaustive
+  simulator tests exercise the complete helper with the production qfloat
+  compiler workaround enabled; v75 has simulator coverage, not device
+  qualification.
+
+- **v73 Crouton arithmetic.** Unscaled half-to-float copies, reduction inputs,
+  and unscaled float epilogues use exact widening on older HVX. Float-to-half
+  activation packing also uses integer conversion with round-to-nearest-even,
+  preserving signed zero and infinity. Scaling and
+  accumulation remain qfloat arithmetic: this includes the scaled float
+  epilogue and the half row/tile add and multiply paths. These are approximate
+  arithmetic operations, not an exact IEEE GEMM contract. HMX already rounds
+  its output to half; blockscaled GEMM tests check the combined result against
+  fp64 with `rtol=4e-3`, `atol=4e-3 * max(abs(reference))`. The separate Q4
+  dequantization contract above is exact and does not inherit that tolerance.
+
 - **DMA primitives are invoked explicitly.** `dma.h` provides raw User-DMA
   instruction wrappers, 1D/type-9 2D descriptor construction, cache maintenance,
   and a caller-owned descriptor ring with start/link/poll/wait/pop/flush operations.
@@ -270,13 +306,21 @@ and explicit HMX atoms.
   context per DSP process, which the skel's `_open` creates (`vtcm.h`). Each run
   takes it and gives it back when it ends (`tl_hexagon_run_kernel`), so the
   processes of a session take turns. The region keeps its address throughout. An
-  uncontended release and acquire costs about 5 µs on a v79.
+  uncontended release and acquire costs about 5 µs on the upstream-tested v79.
+  Resident DDR, workers, and DSP power votes stay alive across calls; grants are
+  released only after the kernel has joined its workers and drained DMA. This
+  does not preempt a long kernel or promise a release-callback deadline.
+  The BSP's legacy resource-attribute initializer option remains independent.
+  Multi-process sessions currently require Android's default cDSP domain;
+  Linux and other domains fail before building. New platform combinations need
+  independent device qualification.
 
 - **The worker pool = 1 HMX + 6 HVX.** The producer/consumer model: the 6 HVX units
   run pack/unpack/softmax/copies in parallel; the 1 HMX MAC is serialized by a
-  `memw_locked` spinlock around the accumulator sequence. Each HW thread enables HMX
-  once via `HAP_compute_res_hmx_lock2(SHARED)`, **keyed on thread id** so the run's
-  thread (which enabled it when it took the context) doesn't double-enable. The pool is
+  `memw_locked` spinlock around the accumulator sequence. Each HMX-using pool thread
+  enables HMX via `HAP_compute_res_hmx_lock2(SHARED)` around its tile programs.
+  This is **keyed on thread id** so the execution thread, already enabled by the
+  active resource scope, does not double-enable. The pool is
   **persistent** (spawned once, blocks on semaphores) so per-call spawn doesn't
   dominate tiny ops. *Never `qurt_hvx_lock`* — just never spawn more workers than HVX
   contexts, and QuRT assigns them implicitly (the htp-ops-lib pattern).
@@ -319,24 +363,40 @@ and explicit HMX atoms.
   the generated kernel entry returns an `int32` status — `TL_OK` / `TL_ERR_VTCM` /
   `TL_ERR_HMX` / `TL_ERR_DMA` (`tl_templates/hexagon/common.h`). In a `num_workers` kernel each tile
   program returns its code, and `tl_parallel_for` returns the lowest failing worker's. The
-  FastRPC skel maps any nonzero to `AEE_EFAILED`, so the host's `run()` *raises* rather
-  than returning unwritten/partial output (the silent-wrong-output trap). The codegen
-  emits the `return`s; a new recipe that can fail should return a nonzero code rather
-  than fault or skip silently.
+  FastRPC skel maps a nonzero kernel status to `KERNEL_STATUS_BASE + status`
+  (`0x1000 + TL_ERR_*`). The host raises an error; the failed kernel may already have
+  modified resident output or state. The codegen emits the `return`s; a new recipe
+  that can fail should return a nonzero code rather than fault or skip silently.
 - **Validate** with `tilelang.compile` + a small torch reference (the `test_*.py`
-  pattern). A compiled kernel is a session of one (below): a call costs a few ms,
-  about 1.5 ms of it the `adb forward` round trip. Each message crosses the socket
-  in one write: `adb` relays every write as a packet, and a small packet followed by
-  another waited out a delayed ACK, which cost ~40 ms per call.
+  pattern). A compiled kernel is a session of one (below). Measure host wall time
+  separately from ARM FastRPC time: the ADB or SSH round trip depends on the
+  transport and device. Agent replies combine their header and payload to avoid
+  a delayed ACK between small writes.
 - **Sessions** (`tilelang.hexagon.runtime.session.Session`) serve models.
   - **Kernels.** Several kernels build into one skel and share one agent and one
-    FastRPC session: one PD, one VTCM grant and one worker pool. Each lowers under its
+    FastRPC session: one persistent worker pool per DSP process. Each lowers under its
     own pass configs (`T.annotate_pass_configs`), as `tilelang.compile` lowers it, so a
     prefill can have fast math while the decode beside it keeps its arithmetic. Lowered
     sources are cached on disk (`$TILELANG_CACHE_DIR/hexagon_lowered`), keyed by the
     kernel's script, the target, its pass configs and the compiler (tilelang's version,
     native libraries and Python sources): the LFM2 decode lowers in 36 s, and in 2 s
     from the cache.
+  - **Connection ownership.** One control socket owns the resident agent. Socket
+    EOF or a truncated request releases its buffers and FastRPC handles and
+    exits, including over legacy Linux ADB where shell stdin may remain open.
+    An executing synchronous FastRPC call must return before EOF is observed;
+    this does not preempt a stuck kernel. Before the first control connection,
+    the agent waits at most `ready_timeout` seconds (30 by default). Each Session
+    uses a private device directory, including concurrent Android sessions.
+    An interrupted or failed wire exchange closes the Session and invalidates
+    its buffers; a complete kernel-error reply remains recoverable. No partial
+    exchange is retried on the same stream.
+  - **Resources.** Each run takes and gives the process's cached VTCM/HMX context,
+    on the execution thread after workers finish, including kernel errors. DSP
+    power votes, execution threads, the worker pool, and resident DDR retain their
+    Session lifetime. The context's VTCM address stays fixed; its contents are not
+    preserved between runs. Cached take/give is the only resource lifecycle;
+    there is no separate resource-lifetime setting.
   - **Resident buffers.** A `DeviceBuffer` is rpcmem, uncached on the CPU and mapped
     into the DSP once (`fastrpc_mmap` with `FASTRPC_MAP_FD`). Kernels reach it by fd
     (`HAP_mmap_get`, resolved once), so a 512 MB resident argument adds no per-call
@@ -349,6 +409,42 @@ and explicit HMX atoms.
     host's bytes later; before a host read, it writes them back.
   - **Arguments.** Each parameter takes, per call, a `DeviceBuffer`, a tensor (copied
     inline) or an int32 scalar.
+  - **Resident sequences.** `Session.run_sequence` accepts an explicit, finite list
+    of `Run(kernel, args)` and `Copy(src, dst, nbytes, src_offset=0, dst_offset=0)`
+    descriptors, imported from `tilelang.hexagon.runtime.session`. It sends the list
+    in one round trip; the ARM agent invokes FastRPC separately for each Run and
+    takes/gives the cached VTCM/HMX context for each invocation. The sequence API
+    does not preempt a long Run or provide a 5 ms scheduling guarantee.
+    Socket operations, including waiting for the entire sequence's reply,
+    default to a 600-second timeout. Use `run_sequence(..., timeout=seconds)`
+    for a longer sequence; the timeout must be finite and positive. A timeout
+    closes the Session without replaying the list, and the ordinary socket
+    timeout is restored after a completed sequence.
+    Each Run targets process 0 and supplies every parameter, using resident buffers and int32 scalars;
+    inline tensors are unsupported. A Run buffer remains 128-byte aligned and must
+    contain the kernel's full static extent. Copy uses arbitrary byte offsets
+    relative to its views, checks cache synchronization in every mapping process, and supports overlap
+    via `memmove`. No loop, branch, automatic retry, or model logic is implicit.
+    Both Python and the agent validate the entire list before execution (at most
+    4096 operations and a 1 MiB encoded payload). Invalid Python descriptors raise
+    `ValueError` without sending the sequence. `SequenceError` reports the failed
+    operation index, unsigned `raw_status`, failure stage, and partial result.
+    `failed_index` is `None` when validation fails for the entire frame, such as a
+    sequence-level allocation failure. A Run's `raw_status` preserves the FastRPC
+    return value, including the dispatcher's `0x1000 + TL_ERR_*` encoding of kernel
+    errors. Even the failed operation may have partial side effects. No effects are
+    rolled back. Validation failure executes nothing. Transport or
+    malformed-response errors close the Session because execution may be unknown.
+    `SequenceResult.runs` gives each attempted Run's operation/kernel indices and
+    ARM FastRPC nanoseconds; `arm_call_ns_sum` sums these. `board_wall_ns` times
+    execution of the entire sequence, including Copy and cache maintenance but
+    excluding validation, allocation, and the host round trip. A failed Run has a
+    timing entry but is excluded from `completed_operations`. Caller-measured host
+    wall time also includes encoding, transport, validation, response decoding, and
+    Python overhead; it is a separate measurement, not the reported board time.
+    All Session operations must be serialized by the caller. Freeing any buffer
+    view invalidates every view of that allocation, even if the agent later reuses
+    its numeric ID. Closing the Session invalidates all buffers.
   - **Cost.** A call costs ~2.4 ms with resident arguments, of which the FastRPC call
     is 0.25–0.4 ms. `Session.last_run_seconds()` reports the agent's timing of the
     last call.

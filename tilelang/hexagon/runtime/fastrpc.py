@@ -3,7 +3,7 @@ kernels' sources (``SKEL_OPEN``, ``SKEL_CLOSE``), the PD's setup, the kernel
 status, and the CMakeLists. A session's project (:mod:`.session`) builds its
 skel and agent with them.
 
-On a Linux BSP, where there is no agent, a kernel's own project
+For one-shot BSP bring-up, a kernel's own project
 (:func:`write_project`) adds an IDL with the kernel's buffers and a one-shot
 host driver that runs one call (:class:`~.linux_runtime.OneShotKernel`).
 Buffers cross the FastRPC boundary as ``sequence<uint8>`` (``in`` for inputs,
@@ -110,7 +110,7 @@ def gen_idl(iface: str, plans: list[BufferPlan]) -> str:
 # What a skel adds around its kernels' sources, which include the template
 # headers they call: its _open takes the DSP process's resources and its _close
 # gives them up (tl_hexagon_open and tl_hexagon_close, RUN_KERNEL).
-SKEL_INCLUDES = "#include <tl_templates/hexagon/power.h>\n"
+SKEL_INCLUDES = "#include <tl_templates/hexagon/common.h>\n#include <tl_templates/hexagon/power.h>\n"
 SKEL_OPEN = "  if (tl_hexagon_open() != 0) return AEE_EFAILED;\n"
 SKEL_CLOSE = "  tl_hexagon_close();\n"
 
@@ -247,9 +247,10 @@ def gen_dsp(iface: str, kernel_name: str, kernel_source: str, plans: list[Buffer
 
 
 def gen_host(iface: str, plans: list[BufferPlan]) -> str:
-    # argv order == kernel param order: buffers -> file path, scalars -> int value.
+    # Domain is a runtime argument, followed by the kernel's parameter order:
+    # buffers -> file path, scalars -> int value.
     reads, calls, writes, frees = [], ["g_handle"], [], []
-    argv = 1
+    argv = 2
     for pl in plans:
         if pl.is_scalar:
             calls.append(f"atoi(argv[{argv}])")
@@ -270,6 +271,7 @@ def gen_host(iface: str, plans: list[BufferPlan]) -> str:
     return (
         "// Auto-generated HLOS host driver for a tilelang Hexagon kernel.\n"
         "#include <AEEStdErr.h>\n#include <remote.h>\n"
+        "#include <errno.h>\n#include <limits.h>\n"
         "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
         '#include "dsp_capabilities_utils.h"\n'
         f'#include "{iface}.h"\n\n'
@@ -294,8 +296,11 @@ def gen_host(iface: str, plans: list[BufferPlan]) -> str:
         '  if (e != AEE_SUCCESS) { fprintf(stderr, "open failed: 0x%x\\n", e); return -1; }\n'
         "  return 0;\n}\n\n"
         "int main(int argc, char** argv) {\n"
-        "  (void)argc;\n"
-        "  if (open_session(CDSP_DOMAIN_ID) != 0) return 1;\n" + "\n".join(reads) + "\n" + f"  int e = {iface}_run({', '.join(calls)});\n"
+        f'  if (argc != {argv}) {{ fprintf(stderr, "expected a domain and {argv - 2} kernel arguments\\n"); return 2; }}\n'
+        "  char* end; errno = 0; long domain_id = strtol(argv[1], &end, 10);\n"
+        "  if (errno || end == argv[1] || *end || domain_id < 0 || domain_id > INT_MAX) {\n"
+        '    fprintf(stderr, "invalid FastRPC domain\\n"); return 2;\n  }\n'
+        "  if (open_session((int)domain_id) != 0) return 1;\n" + "\n".join(reads) + "\n" + f"  int e = {iface}_run({', '.join(calls)});\n"
         '  if (e != AEE_SUCCESS) { fprintf(stderr, "run failed: 0x%x\\n", e); }\n'
         "  else {\n" + "\n".join(writes) + "\n  }\n" + "\n".join(frees) + "\n"
         f"  {iface}_close(g_handle);\n"
@@ -305,7 +310,7 @@ def gen_host(iface: str, plans: list[BufferPlan]) -> str:
 
 def gen_cmake(iface: str, template_dir: str, agent: bool) -> str:
     # The DSP skel (skel + impl, compiled with HVX/HMX enabled) and, for a
-    # session, its Android agent (stub + agent). ``template_dir`` is the parent
+    # session, its HLOS agent (stub + agent). ``template_dir`` is the parent
     # of ``tl_templates`` so the kernel's <tl_templates/hexagon/...> include
     # resolves (as nvcc/hipcc get -I TILELANG_TEMPLATE_PATH). A Linux BSP builds
     # its host driver itself (linux_build.py).
