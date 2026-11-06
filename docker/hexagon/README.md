@@ -188,3 +188,11 @@ TileLang/TVM image: changed Python, DSP headers and Docker scripts were replaced
 the native compiler was reused. Each ARM host and DSP kernel was freshly built.
 These are correctness/build checks, not performance measurements or Android
 phone execution results.
+
+## Original 19-configuration benchmark
+
+The standalone [benchmark19 guide](../../examples/hexagon/benchmark19/README.md)
+provides single-case and all-case TileLang measurements for Linux SA8650/v73.
+Its input tensors are a separate checksummed data package; results and data are
+excluded from Git and the Docker build context. llama.cpp comparison setup is
+documented separately in that guide and is not required by the TileLang runner.
