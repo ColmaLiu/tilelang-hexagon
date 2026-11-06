@@ -1,0 +1,13 @@
+/runs/
+/data/
+/build/
+/dist/
+/downloads/
+__pycache__/
+*.pyc
+*.log
+*.bin
+*.o
+*.so
+*.tar.gz
+*.tgz

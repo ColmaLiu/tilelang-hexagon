@@ -1,0 +1,266 @@
+{
+  "ADD_32_2048": {
+    "group": "map",
+    "index": 0,
+    "spec": {
+      "name": "ADD_32_2048",
+      "kind": "add",
+      "m": 32,
+      "n": 2048,
+      "dma": true,
+      "tile_rows": 4,
+      "group_tiles": 2,
+      "dma_store": false,
+      "workers": 4
+    }
+  },
+  "MUL_32_2048": {
+    "group": "map",
+    "index": 1,
+    "spec": {
+      "name": "MUL_32_2048",
+      "kind": "mul",
+      "m": 32,
+      "n": 2048,
+      "dma": true,
+      "tile_rows": 4,
+      "group_tiles": 2,
+      "dma_store": false,
+      "workers": 4
+    }
+  },
+  "SCALE_32_2048": {
+    "group": "map",
+    "index": 2,
+    "spec": {
+      "name": "SCALE_32_2048",
+      "kind": "scale",
+      "m": 32,
+      "n": 2048,
+      "dma": true,
+      "tile_rows": 2,
+      "group_tiles": 4,
+      "dma_store": false,
+      "workers": 4
+    }
+  },
+  "RMS_NORM_32_2048": {
+    "group": "map",
+    "index": 3,
+    "spec": {
+      "name": "RMS_NORM_32_2048",
+      "kind": "rmsnorm",
+      "m": 32,
+      "n": 2048,
+      "dma": true,
+      "tile_rows": 2,
+      "group_tiles": 4,
+      "dma_store": false,
+      "workers": 4
+    }
+  },
+  "ADD_128_4096": {
+    "group": "map",
+    "index": 4,
+    "spec": {
+      "name": "ADD_128_4096",
+      "kind": "add",
+      "m": 128,
+      "n": 4096,
+      "dma": true,
+      "tile_rows": 8,
+      "group_tiles": 4,
+      "dma_store": false,
+      "workers": 4
+    }
+  },
+  "MUL_128_4096": {
+    "group": "map",
+    "index": 5,
+    "spec": {
+      "name": "MUL_128_4096",
+      "kind": "mul",
+      "m": 128,
+      "n": 4096,
+      "dma": true,
+      "tile_rows": 2,
+      "group_tiles": 2,
+      "dma_store": false,
+      "workers": 6
+    }
+  },
+  "SCALE_128_4096": {
+    "group": "map",
+    "index": 6,
+    "spec": {
+      "name": "SCALE_128_4096",
+      "kind": "scale",
+      "m": 128,
+      "n": 4096,
+      "dma": true,
+      "tile_rows": 8,
+      "group_tiles": 4,
+      "dma_store": false,
+      "workers": 4
+    }
+  },
+  "RMS_NORM_128_4096": {
+    "group": "map",
+    "index": 7,
+    "spec": {
+      "name": "RMS_NORM_128_4096",
+      "kind": "rmsnorm",
+      "m": 128,
+      "n": 4096,
+      "dma": true,
+      "tile_rows": 8,
+      "group_tiles": 4,
+      "dma_store": false,
+      "workers": 4
+    }
+  },
+  "ADD_1_2048": {
+    "group": "map",
+    "index": 8,
+    "spec": {
+      "name": "ADD_1_2048",
+      "kind": "add",
+      "m": 1,
+      "n": 2048,
+      "dma": null,
+      "tile_rows": 1,
+      "group_tiles": 1,
+      "dma_store": false,
+      "workers": 1
+    }
+  },
+  "MUL_1_2048": {
+    "group": "map",
+    "index": 9,
+    "spec": {
+      "name": "MUL_1_2048",
+      "kind": "mul",
+      "m": 1,
+      "n": 2048,
+      "dma": null,
+      "tile_rows": 1,
+      "group_tiles": 1,
+      "dma_store": false,
+      "workers": 1
+    }
+  },
+  "SCALE_1_2048": {
+    "group": "map",
+    "index": 10,
+    "spec": {
+      "name": "SCALE_1_2048",
+      "kind": "scale",
+      "m": 1,
+      "n": 2048,
+      "dma": null,
+      "tile_rows": 1,
+      "group_tiles": 1,
+      "dma_store": false,
+      "workers": 1
+    }
+  },
+  "RMS_NORM_1_2048": {
+    "group": "map",
+    "index": 11,
+    "spec": {
+      "name": "RMS_NORM_1_2048",
+      "kind": "rmsnorm",
+      "m": 1,
+      "n": 2048,
+      "dma": null,
+      "tile_rows": 1,
+      "group_tiles": 1,
+      "dma_store": false,
+      "workers": 1
+    }
+  },
+  "GEMM_64_64_64": {
+    "group": "gemm",
+    "index": 0,
+    "spec": {
+      "m": 64,
+      "n": 64,
+      "k": 64,
+      "bn": 64,
+      "copy_workers": 1,
+      "fused_copy": true
+    }
+  },
+  "GEMM_128_128_128": {
+    "group": "gemm",
+    "index": 1,
+    "spec": {
+      "m": 128,
+      "n": 128,
+      "k": 128,
+      "bn": 128,
+      "copy_workers": 1,
+      "fused_copy": true
+    }
+  },
+  "GEMM_128_256_256": {
+    "group": "gemm",
+    "index": 2,
+    "spec": {
+      "m": 128,
+      "n": 256,
+      "k": 256,
+      "bn": 256,
+      "copy_workers": 1,
+      "fused_copy": true
+    }
+  },
+  "GEMM_256_256_256": {
+    "group": "gemm",
+    "index": 3,
+    "spec": {
+      "m": 256,
+      "n": 256,
+      "k": 256,
+      "bn": 256,
+      "copy_workers": 1,
+      "fused_copy": true
+    }
+  },
+  "GEMM_256_512_2048": {
+    "group": "gemm",
+    "index": 4,
+    "spec": {
+      "m": 256,
+      "n": 512,
+      "k": 2048,
+      "bn": 512,
+      "copy_workers": 6,
+      "fused_copy": true
+    }
+  },
+  "GEMM_32_1024_2048": {
+    "group": "gemm",
+    "index": 5,
+    "spec": {
+      "m": 32,
+      "n": 1024,
+      "k": 2048,
+      "bn": 256,
+      "copy_workers": 5,
+      "fused_copy": true
+    }
+  },
+  "GEMM_256_2048_2048": {
+    "group": "gemm",
+    "index": 6,
+    "spec": {
+      "m": 256,
+      "n": 2048,
+      "k": 2048,
+      "bn": 512,
+      "copy_workers": 6,
+      "fused_copy": true
+    }
+  }
+}

@@ -10,3 +10,10 @@ output
 docker/hexagon/local
 *.tar
 *.tar.gz
+
+# Benchmark outputs and externally distributed tensor data.
+examples/hexagon/benchmark19/runs
+examples/hexagon/benchmark19/data
+examples/hexagon/benchmark19/build
+examples/hexagon/benchmark19/dist
+examples/hexagon/benchmark19/downloads

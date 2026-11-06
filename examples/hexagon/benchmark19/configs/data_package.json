@@ -1,0 +1,10 @@
+{
+  "filename": "benchmark19-inputs-v1.tar.gz",
+  "sha256": "51e8d23e89c166ce236969cfb7938328a8e67e66f2b500372b3cc9a9afd8efe8",
+  "bytes": 126084834,
+  "files": 153,
+  "archive_root": [
+    "map",
+    "gemm"
+  ]
+}
