@@ -213,7 +213,7 @@ static struct {
   int32_t failed;                 // a program stopped with an error
   int32_t passed[TL_MAX_WORKERS]; // barriers program i has reached, its own
   bool oversubscribed; // more participants than reported 128-byte HVX contexts
-  uint32_t event;      // changes after every completion or failure publication
+  uint32_t event;      // changes when registered waiters are notified
   int32_t waiters;     // participants registered in the blocking path
 } tl_grid;
 
@@ -229,14 +229,16 @@ static inline bool tl_grid_is_oversubscribed(int programs) {
   return tl_grid_hvx_contexts > 0 && programs > tl_grid_hvx_contexts;
 }
 
-// Both completion and failure change the word on which participants park.
-// The sequentially consistent event/count handshake avoids a lost wake when
-// registration races with publication. Only a registered waiter needs waking.
+// Publish completion/failure before checking the registered waiters. These
+// operations and the slow waiter's registration/condition reads are all SC:
+// either the publisher sees the waiter, or that waiter sees the publication.
+// Only registered waiters need an event change and a wake.
 template <bool Parking> static inline void tl_grid_notify(void) {
   static_assert(Parking);
-  __atomic_fetch_add(&tl_grid.event, 1u, __ATOMIC_SEQ_CST);
-  if (__atomic_load_n(&tl_grid.waiters, __ATOMIC_SEQ_CST))
+  if (__atomic_load_n(&tl_grid.waiters, __ATOMIC_SEQ_CST)) {
+    __atomic_fetch_add(&tl_grid.event, 1u, __ATOMIC_SEQ_CST);
     qurt_futex_wake(&tl_grid.event, TL_MAX_WORKERS);
+  }
 }
 
 // Keep the whole blocking wait out of line so live vector values need saving
@@ -248,11 +250,11 @@ tl_grid_wait_blocking(int32_t barrier) {
   int32_t status;
   for (;;) {
     uint32_t event = __atomic_load_n(&tl_grid.event, __ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&tl_grid.completed, __ATOMIC_ACQUIRE) == barrier) {
+    if (__atomic_load_n(&tl_grid.completed, __ATOMIC_SEQ_CST) == barrier) {
       status = TL_OK;
       break;
     }
-    if (__atomic_load_n(&tl_grid.failed, __ATOMIC_RELAXED)) {
+    if (__atomic_load_n(&tl_grid.failed, __ATOMIC_SEQ_CST)) {
       status = TL_ERR_GRID;
       break;
     }
@@ -275,7 +277,8 @@ template <bool Parking> static inline int32_t tl_grid_sync(int32_t program) {
       tl_grid.programs) {
     // The last program resets the count before it releases the others.
     __atomic_store_n(&tl_grid.arrived, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&tl_grid.completed, barrier, __ATOMIC_RELEASE);
+    __atomic_store_n(&tl_grid.completed, barrier,
+                     Parking ? __ATOMIC_SEQ_CST : __ATOMIC_RELEASE);
     if constexpr (Parking)
       tl_grid_notify<Parking>();
     return TL_OK;
@@ -319,7 +322,9 @@ struct tl_parallel_for_job {
     }
     // Programs waiting at a barrier for a failed one stop (tl_grid_sync).
     if (status != TL_OK) {
-      __atomic_store_n(&tl_grid.failed, 1, __ATOMIC_RELAXED);
+      __atomic_store_n(&tl_grid.failed, 1,
+                       Coresident && Parking ? __ATOMIC_SEQ_CST
+                                             : __ATOMIC_RELAXED);
       if constexpr (Coresident && Parking)
         tl_grid_notify<Parking>();
     }

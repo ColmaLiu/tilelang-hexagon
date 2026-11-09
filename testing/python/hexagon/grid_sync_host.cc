@@ -56,6 +56,7 @@ static std::condition_variable control;
 static bool hold_entry, hold_return;
 static std::atomic<unsigned> pauses{0}, entries{0}, parked{0}, mismatches{0};
 static unsigned spurious_budget, spurious_returns;
+static std::atomic<unsigned> wake_calls{0};
 static void announce() {
   std::lock_guard<std::mutex> lock(control_mutex);
   control.notify_all();
@@ -112,6 +113,7 @@ static int qurt_futex_wait(void *word, int expected) {
   return QURT_EOK;
 }
 static int qurt_futex_wake(void *word, int limit) {
+  ++wake_calls;
   std::lock_guard<std::mutex> lock(futex_mutex);
   int count = 0;
   for (auto waiter : waiters) {
@@ -210,8 +212,10 @@ static void check_spin_failure() {
   assert(tl_grid.completed == 0 && entries == 0);
 }
 static void check_publication(bool before_park, bool failure,
-                              bool completed_first = false) {
+                              bool completed_first = false,
+                              uint32_t initial_event = 0) {
   initialize(2, 1);
+  tl_grid.event = initial_event;
   hold_entry = before_park;
   hold_return = completed_first;
   int status = -1;
@@ -230,6 +234,27 @@ static void check_publication(bool before_park, bool failure,
   assert(tl_grid.waiters == 0 && waiters.empty());
   if (before_park)
     assert(mismatches == 1 && parked == 0);
+  const unsigned publications = completed_first && failure ? 2u : 1u;
+  assert(tl_grid.event == initial_event + publications);
+  assert(wake_calls == publications);
+}
+// Model a waiter delayed between its fast check and slow registration. Use
+// the actual last-arrival and job-failure publishers with no registered waiter,
+// then call the actual slow helper after publication. No event change or wake
+// is needed: its SC condition checks must observe the published result.
+static void check_late_publication(bool completed, bool failed) {
+  initialize(1, 1);
+  constexpr uint32_t initial_event = 0x31415926u;
+  tl_grid.event = initial_event;
+  if (completed)
+    assert(tl_grid_sync<true>(0) == TL_OK);
+  if (failed)
+    fail_program<true>(0, 1);
+  assert(tl_grid.event == initial_event && tl_grid.waiters == 0);
+  assert(wake_calls == 0 && entries == 0);
+  assert(tl_grid_wait_blocking(1) == (completed ? TL_OK : TL_ERR_GRID));
+  assert(tl_grid.event == initial_event && tl_grid.waiters == 0);
+  assert(wake_calls == 0 && entries == 0 && waiters.empty());
 }
 static void check_completed_spin() {
   initialize(6, 6);
@@ -265,6 +290,16 @@ int main(int argc, char **argv) {
     check_publication(true, false);
   else if (test == "completed-parked")
     check_publication(false, false);
+  else if (test == "late-completed")
+    check_late_publication(true, false);
+  else if (test == "late-failed")
+    check_late_publication(false, true);
+  else if (test == "late-completed-and-failed")
+    check_late_publication(true, true);
+  else if (test == "wrapped-completed-before-park")
+    check_publication(true, false, false, UINT32_MAX);
+  else if (test == "wrapped-failed-before-park")
+    check_publication(true, true, false, UINT32_MAX);
   else if (test == "completed-spin")
     check_completed_spin();
   else if (test == "completed-blocking")

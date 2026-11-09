@@ -51,6 +51,11 @@ def grid_host(tmp_path_factory):
         "completed-parked",
         "completed-spin",
         "completed-blocking",
+        "late-completed",
+        "late-failed",
+        "late-completed-and-failed",
+        "wrapped-completed-before-park",
+        "wrapped-failed-before-park",
     ],
 )
 def test_grid_barrier_on_host(grid_host, case):
