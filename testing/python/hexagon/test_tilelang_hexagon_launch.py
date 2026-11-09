@@ -1,6 +1,7 @@
 """The Hexagon launch grid in TIR: a serial loop nest, or one worker-pool loop."""
 
 import os
+import re
 
 import pytest
 
@@ -227,6 +228,36 @@ def test_programs_meet_at_sync_grid():
         in source
     )
     assert source.count("if (int32_t tl_status = tl_grid_sync<decltype(tl_grid_policy)::value>(bx)) return tl_status;") == 1
+
+
+@pytest.mark.parametrize("parameter_kind", ["buffer", "scalar"])
+def test_grid_policy_does_not_shadow_parameters(parameter_kind):
+    @T.prim_func
+    def named_buffer(tl_grid_policy: T.Tensor((2, 64), "float32"), rows: T.Tensor((2, 64), "float32"), B: T.Tensor((2, 64), "float32")):
+        with T.Kernel(2, num_workers=2) as w:
+            T.copy(tl_grid_policy[w, :], rows[w, :])
+            T.sync_grid()
+            T.copy(rows[(w + 1) % 2, :], B[w, :])
+
+    @T.prim_func
+    def named_scalar(rows: T.Tensor((2,), "int32"), B: T.Tensor((2,), "int32"), tl_grid_policy: T.int32):
+        with T.Kernel(2, num_workers=2) as w:
+            rows[w] = tl_grid_policy + w
+            T.sync_grid()
+            B[w] = rows[(w + 1) % 2]
+
+    func = named_buffer if parameter_kind == "buffer" else named_scalar
+    source = _lower(func).kernel_source
+    parameters = re.search(r"int32_t \w+_kernel\(([^)]*)\)", source).group(1).split(",")
+    user_name = parameters[0 if parameter_kind == "buffer" else -1].split()[-1]
+    policy_name = re.search(r", auto (\w+)\)", source).group(1)
+    assert user_name != policy_name
+    # The worker must capture the caller's tensor or scalar, not convert the
+    # compile-time policy to a pointer or silently use its boolean value.
+    if parameter_kind == "buffer":
+        assert f"tl_exclusive({user_name})" in source
+    else:
+        assert f" = {user_name};" in source
 
 
 def test_sync_grid_needs_a_worker_per_program():

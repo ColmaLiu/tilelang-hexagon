@@ -439,7 +439,8 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
   dma_in_scope_ = false;
   // Names the runtime calls bind; reserve them before the parameters so no
   // parameter can take them.
-  for (const char *name : {"tl_dma_async", "tl_status", "tl_arena"})
+  for (const char *name :
+       {"tl_dma_async", "tl_status", "tl_arena", "tl_grid_policy"})
     name_supply_->ReserveName(name);
 
   for (size_t i = 0; i < f->params.size(); ++i) {
