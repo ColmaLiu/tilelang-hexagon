@@ -11,6 +11,7 @@
 #include <vector>
 
 enum { TL_OK = 0, TL_ERR_VTCM = 1, TL_ERR_GRID = 4, QURT_EOK = 0 };
+constexpr unsigned QURT_MAX_HTHREAD_LIMIT = 8;
 constexpr unsigned TL_VTCM_HMX_ALIGNMENT = 2048;
 struct qurt_sysenv_max_hthreads_t {
   unsigned max_hthreads;
@@ -94,8 +95,8 @@ static unsigned tl_vtcm_arena_bytes() { std::abort(); }
 
 #include <tl_templates/hexagon/worker.h>
 
-static std::array<uint8_t, 6 * 16> arena_storage{};
-static tl_worker_arenas arenas(unsigned count = 6) {
+static std::array<uint8_t, QURT_MAX_HTHREAD_LIMIT * 16> arena_storage{};
+static tl_worker_arenas arenas(unsigned count = QURT_MAX_HTHREAD_LIMIT) {
   return {arena_storage.data(), 16, count};
 }
 static std::atomic<unsigned> opened{0}, closed{0}, drained{0}, callbacks{0};
@@ -149,18 +150,18 @@ static void batch(int requested, int arena_count, int expected_workers) {
     assert(visits[i] == 1 && values[i] == 3 * i + 7);
   assert(drained == callbacks);
 }
-static void rejected(int extent, int count) {
+static void rejected(int extent, int count, int requested = 6) {
   auto body = [](int, uint8_t *) {
     ++callbacks;
     return TL_OK;
   };
-  assert((tl_parallel_for<TrackedScope, true>(extent, 6, arenas(count), body) ==
-          TL_ERR_GRID));
+  assert((tl_parallel_for<TrackedScope, true>(extent, requested, arenas(count),
+                                              body) == TL_ERR_GRID));
   assert(callbacks == 0 && opened == 0 && create_attempts == 0);
   assert(!tl_pool.tried && threads.empty());
 }
 static void visibility(int participants, int requested) {
-  std::array<int, 6> values{};
+  std::array<int, QURT_MAX_HTHREAD_LIMIT> values{};
   auto body = [&](int i, uint8_t *) -> int {
     assert(resource_live);
     for (int generation = 1; generation <= 64; ++generation) {
@@ -204,13 +205,17 @@ int main(int argc, char **argv) {
   } else if (name == "limit-six") {
     hardware_units = 6 << 8;
     check_limit(6);
+  } else if (name == "limit-eight") {
+    hardware_threads = 8;
+    hardware_units = 8 << 8;
+    check_limit(8);
   } else if (name == "limit-hardware") {
     hardware_threads = 2;
     check_limit(2);
   } else if (name == "limit-software") {
     hardware_threads = 99;
     hardware_units = 255 << 8;
-    check_limit(6);
+    check_limit(8);
   } else if (name == "query-failed" || name == "hardware-zero") {
     query_status = name == "query-failed" ? -1 : 0;
     hardware_threads = name == "query-failed" ? 6 : 0;
@@ -242,6 +247,21 @@ int main(int argc, char **argv) {
     // Reuse the persistent pool; every program is still visited exactly once.
     batch(6, 6, 4);
     assert(create_attempts == 3 && hardware_queries == 1 && hvx_queries == 1);
+  } else if (name == "batch-eight" || name == "barrier-eight" ||
+             name == "reject-nine") {
+    hardware_threads = 8;
+    hardware_units = 8 << 8;
+    if (name == "reject-nine") {
+      rejected(9, 8, 9);
+    } else {
+      if (name == "batch-eight") {
+        batch(9, 8, 8);
+        batch(8, 8, 8);
+      } else {
+        visibility(8, 8);
+      }
+      assert(threads.size() == 7 && create_attempts == 7);
+    }
   } else if (name == "reject-six" || name == "reject-arena") {
     rejected(name == "reject-six" ? 6 : 3, name == "reject-six" ? 6 : 2);
   } else if (name == "extent-four-request-six" || name == "barrier-four" ||

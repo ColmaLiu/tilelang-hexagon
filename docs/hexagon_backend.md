@@ -190,8 +190,9 @@ and explicit HMX atoms.
 
 `num_workers` is a requested upper bound. The runtime caches the smaller of the
 reported HW-thread count, the reported 128-byte HVX-context count, and
-`TL_MAX_WORKERS` (6). These are device configuration limits, independent of the
-ISA version or the number of contexts currently free. If either query fails or
+the SDK's `QURT_MAX_HTHREAD_LIMIT` storage capacity (currently 8). These are
+configuration limits, independent of the ISA version or the number of contexts
+currently free. If either query fails or
 reports no usable capacity, execution uses only the calling thread. The grid
 size and available per-worker arenas can reduce the worker count further.
 Ordinary grids distribute their programs over those workers; a grid containing

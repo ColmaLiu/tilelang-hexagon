@@ -253,13 +253,15 @@ int32_t worker_limits(int32_t* out) {
   out[0] = qurt_sysenv_get_max_hw_threads(&h);
   out[1] = h.max_hthreads;
   out[2] = qurt_hvx_get_units();
+  out[3] = QURT_MAX_HTHREAD_LIMIT;
   return 0;
 }
 """
-    with Session.of_lowered([("worker_limits", source, [KernelParam("int32", [3])], [0])]) as session:
-        status, hardware, units = session.kernels[0]().tolist()
+    with Session.of_lowered([("worker_limits", source, [KernelParam("int32", [4])], [0])]) as session:
+        status, hardware, units, capacity = session.kernels[0]().tolist()
     contexts = (units >> 8) & 255 if units > 0 else 0
-    return min(6, hardware, contexts) if status == 0 and hardware > 0 and contexts > 0 else 1
+    assert capacity > 0
+    return min(capacity, hardware, contexts) if status == 0 and hardware > 0 and contexts > 0 else 1
 
 
 def _check_capped_grid(func, arguments, out_idx, expected, programs, worker_limit):
@@ -290,7 +292,7 @@ def _check_capped_grid(func, arguments, out_idx, expected, programs, worker_limi
 
 
 @pytest.mark.skipif(os.environ.get("TL_HEXAGON_DEVICE_TEST") != "1", reason="requires an authorized Hexagon device and SDK")
-@pytest.mark.parametrize("programs,num_workers", [(2, 2), (4, 4), (4, 6), (6, 6)])
+@pytest.mark.parametrize("programs,num_workers", [(2, 2), (4, 4), (4, 6), (4, 8), (6, 6), (8, 8)])
 def test_programs_exchange_rows_across_sync_grid(programs, num_workers, device_worker_limit):
     import torch
 

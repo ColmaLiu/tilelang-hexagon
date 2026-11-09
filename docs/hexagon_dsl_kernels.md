@@ -355,8 +355,9 @@ scalar code, is visible to all programs after it. Such programs run all at once,
 per worker, so the grid may have at most `num_workers` programs: `MaterializeGrid`
 rejects a larger grid. `num_workers` is an upper bound, not a guarantee: the runtime
 caches the minimum of the reported HW threads, reported 128-byte HVX contexts, and
-`TL_MAX_WORKERS` (6), with the calling thread alone as the fallback if either query
-fails or reports no usable capacity. This limit comes from the device, not its ISA
+the SDK's `QURT_MAX_HTHREAD_LIMIT` storage capacity (currently 8), with the calling
+thread alone as the fallback if either query fails or reports no usable capacity.
+This limit comes from the device, not its ISA
 version, and does not measure currently free contexts. Available per-worker VTCM
 arenas and successful thread creation can limit execution further. Ordinary grids
 distribute their programs over the available workers. A synchronizing grid that

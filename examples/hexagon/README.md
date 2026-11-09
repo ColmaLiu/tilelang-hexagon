@@ -63,7 +63,8 @@ TL_HEXAGON_DEVICE_TEST=1 TILELANG_HEXAGON_DEVICE_LOCK=/tmp/tl_hexagon_device.loc
 ## Notes
 
 - **`num_workers`** requests an upper bound. Actual workers are capped by the
-  device's reported HW threads, 128-byte HVX contexts, and the software limit of 6;
+  device's reported HW threads, 128-byte HVX contexts, and the SDK's
+  `QURT_MAX_HTHREAD_LIMIT` storage capacity (currently 8);
   unavailable queries fall back to the calling thread alone. Each worker has its
   own buffers and VTCM arena. Ordinary grids distribute their programs over the
   available workers. A grid using `T.sync_grid()` must fit entirely or fails with

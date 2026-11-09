@@ -39,6 +39,7 @@ def worker_host(tmp_path_factory):
     [
         "limit-four",
         "limit-six",
+        "limit-eight",
         "limit-hardware",
         "limit-software",
         "query-failed",
@@ -51,8 +52,10 @@ def worker_host(tmp_path_factory):
         "batch-four",
         "batch-request-two",
         "batch-arena-two",
+        "batch-eight",
         "reject-six",
         "reject-arena",
+        "reject-nine",
         "extent-four-request-six",
         "partial-batch",
         "partial-core",
@@ -60,6 +63,7 @@ def worker_host(tmp_path_factory):
         "body-failure",
         "barrier-four",
         "barrier-six",
+        "barrier-eight",
         "barrier-failure",
     ],
 )

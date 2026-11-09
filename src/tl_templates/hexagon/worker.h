@@ -25,7 +25,8 @@
 #include <tl_templates/hexagon/vtcm.h>
 #include <type_traits>
 
-#define TL_MAX_WORKERS 6 // software capacity, not a device resource count
+// QuRT's cross-target array capacity, not the current device's worker count.
+static constexpr int TL_MAX_WORKERS = QURT_MAX_HTHREAD_LIMIT;
 // 64 KiB a worker: a megakernel's program body and the out-of-line GEMMs it
 // calls take tens of KiB of frames.
 #define TL_WORKER_STACK_SZ (64 * 1024)

@@ -32,8 +32,9 @@ def Kernel(
         lines or helper functions.
     num_workers : int, optional
         Requested upper bound on workers, capped by the device's reported HW
-        threads, 128-byte HVX contexts, and the software limit of 6. Unavailable
-        queries fall back to the calling thread alone. Each worker runs whole
+        threads, 128-byte HVX contexts, and the SDK's ``QURT_MAX_HTHREAD_LIMIT``
+        storage capacity (currently 8). Unavailable queries fall back to the
+        calling thread alone. Each worker runs whole
         programs with its own buffers and VTCM arena. Programs must be independent
         except at ``T.sync_grid()``: its grid must fit both ``num_workers`` and
         the available workers and arenas, or fail with ``TL_ERR_GRID`` before
