@@ -177,7 +177,7 @@ attention, FFN, RMSNorm, a w4a16 GEMV) and the LFM2-1.2B model end to end live i
 | DSL | Generated C | Recipe (Layer 4) |
 |---|---|---|
 | `T.Kernel(grid)` | nested `for` loops (grid serialized on one HW thread) | — |
-| `T.Kernel(..., num_workers=N)` | one `tl_parallel_for` over the linearized grid: up to N HW threads run its tile programs, each worker with a private VTCM arena | `worker.h` |
+| `T.Kernel(..., num_workers=N)` | one `tl_parallel_for` over the linearized grid: at most N workers, limited by the device's reported HW threads and 128-byte HVX contexts, each with a private VTCM arena | `worker.h` |
 | `T.alloc_shared` | a byte offset into the tile program's VTCM arena (`tl_vtcm_arena()+off`, or the worker's `tl_arena+off`) | `vtcm.h` |
 | `T.alloc_global(..., scope="global.vtcm")` | one buffer all the programs share, bound before the worker loop at a byte offset from the VTCM base; the arenas follow | `vtcm.h`, `worker.h` |
 | `T.copy(matrix, crouton_shared)` | one `tl_crouton_copy`: pack a region of a strided fp16/fp32 matrix (DDR or VTCM) into Crouton tiles | `copy.cc`, `crouton.h` |
@@ -187,6 +187,16 @@ attention, FFN, RMSNorm, a w4a16 GEMV) and the LFM2-1.2B model end to end live i
 Reading generated C for a tiled matmul now shows the grid loops, one
 `tl_crouton_copy` per matrix at the DDR/Crouton boundary, Crouton VTCM offsets,
 and explicit HMX atoms.
+
+`num_workers` is a requested upper bound. The runtime caches the smaller of the
+reported HW-thread count, the reported 128-byte HVX-context count, and
+`TL_MAX_WORKERS` (6). These are device configuration limits, independent of the
+ISA version or the number of contexts currently free. If either query fails or
+reports no usable capacity, execution uses only the calling thread. The grid
+size and available per-worker arenas can reduce the worker count further.
+Ordinary grids distribute their programs over those workers; a grid containing
+`T.sync_grid()` must fit entirely and returns `TL_ERR_GRID` before any program
+starts if its workers cannot all run together.
 
 ---
 
@@ -494,8 +504,8 @@ knowledge into C template headers** behind one call per tile-op. Hexagon is trea
 a **C-codegen sibling of the CPU backend** (not a GPU codegen), driven by a **lean
 direct-FastRPC runtime**. The result: the same `T.gemm` the user would write for CUDA
 runs idiomatically on the HMX matrix engine, composes into flash attention, and
-parallelizes across the 6 HW threads with the 1 HMX serialized — all validated on real
-hardware.
+parallelizes across the device's usable worker capacity with the HMX serialized.
+The operator and model measurements above were validated on real hardware.
 
 ### HMX K-tile packets
 

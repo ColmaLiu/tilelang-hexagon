@@ -62,10 +62,13 @@ TL_HEXAGON_DEVICE_TEST=1 TILELANG_HEXAGON_DEVICE_LOCK=/tmp/tl_hexagon_device.loc
 
 ## Notes
 
-- **`num_workers`** runs the grid's tile programs on up to that many HW threads, each
-  worker with its own buffers and VTCM arena. It helps HVX-heavy, streaming and
-  batched work; a single HMX-bound matmul is limited by the one matrix engine. Worker
-  programs that run together can meet at `T.sync_grid()`, as the LFM2 decode does.
+- **`num_workers`** requests an upper bound. Actual workers are capped by the
+  device's reported HW threads, 128-byte HVX contexts, and the software limit of 6;
+  unavailable queries fall back to the calling thread alone. Each worker has its
+  own buffers and VTCM arena. Ordinary grids distribute their programs over the
+  available workers. A grid using `T.sync_grid()` must fit entirely or fails with
+  `TL_ERR_GRID` before any program starts. Workers help HVX-heavy, streaming and
+  batched work; a single HMX-bound matmul is limited by the one matrix engine.
 - **Explicit async DMA is `T.dma_copy(src, dst)` and `T.dma_wait(pending=0)`.** Each
   copy is one group of the tile program's queue; a wait completes the older copies
   until at most the newest `pending` are in flight. Wait before reading a destination

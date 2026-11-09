@@ -439,8 +439,7 @@ void CodeGenTileLangHexagon::AddFunction(const PrimFunc &f) {
   dma_in_scope_ = false;
   // Names the runtime calls bind; reserve them before the parameters so no
   // parameter can take them.
-  for (const char *name :
-       {"tl_dma_async", "tl_status", "tl_arena", "tl_grid_policy"})
+  for (const char *name : {"tl_dma_async", "tl_status", "tl_arena"})
     name_supply_->ReserveName(name);
 
   for (size_t i = 0; i < f->params.size(); ++i) {
@@ -535,8 +534,6 @@ void CodeGenTileLangHexagon::PrintWorkerLoop(const ForNode *op) {
   stream << ' ' << AllocVarID(op->loop_var.get());
   if (arena_bytes > 0)
     stream << ", uint8_t *tl_arena";
-  if (grid_sync)
-    stream << ", auto tl_grid_policy";
   stream << ")";
   if (UsesFloatingArithmetic(op->body))
     stream << " TL_HEXAGON_IEEE_ARITHMETIC";
@@ -738,8 +735,7 @@ void CodeGenTileLangHexagon::VisitStmt_(const EvaluateNode *op) { // NOLINT(*)
     // a launch of one program has nothing to wait for.
     if (worker_program_) {
       PrintIndent();
-      stream << "if (int32_t tl_status = "
-                "tl_grid_sync<decltype(tl_grid_policy)::value>("
+      stream << "if (int32_t tl_status = tl_grid_sync("
              << GetVarID(worker_program_.value().get())
              << ")) return tl_status;\n";
     }

@@ -31,12 +31,13 @@ def Kernel(
         C source injected before the generated kernel, e.g. ``#include``
         lines or helper functions.
     num_workers : int, optional
-        Run the tile programs on up to this many HW threads. Each worker runs
-        whole programs with its own buffers and VTCM arena, so the programs
-        must be independent, except at ``T.sync_grid()``: programs that call
-        it run all at once, one per worker, and wait there for each other, so
-        their grid may have at most ``num_workers`` programs. ``None`` runs the
-        grid on one thread.
+        Requested upper bound on workers, capped by the device's reported HW
+        threads, 128-byte HVX contexts, and the software limit of 6. Unavailable
+        queries fall back to the calling thread alone. Each worker runs whole
+        programs with its own buffers and VTCM arena. Programs must be independent
+        except at ``T.sync_grid()``: its grid must fit both ``num_workers`` and
+        the available workers and arenas, or fail with ``TL_ERR_GRID`` before
+        any program starts. ``None`` runs the grid on one thread.
 
     Examples
     --------
@@ -45,8 +46,9 @@ def Kernel(
         with T.Kernel(T.ceildiv(M, 32), num_workers=6) as bx:
             ...
 
-        # Phases: every program writes its slice of `h`, then reads all of it.
-        with T.Kernel(6, num_workers=6) as w:
+        # Requires capacity for two simultaneous workers.
+        # Every program writes its slice of `h`, then reads all of it.
+        with T.Kernel(2, num_workers=2) as w:
             ...
             T.sync_grid()
             ...

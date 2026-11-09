@@ -4,9 +4,8 @@
 // The Hexagon DSP has a few HW threads, each able to issue HVX (and,
 // time-shared, HMX) instructions.  tl_parallel runs a callback on `nw` workers:
 // worker 0 on the CALLING thread, 1..nw-1 on a PERSISTENT pool of qurt threads.
-// QuRT assigns HVX contexts implicitly. The hardware-thread count can exceed
-// the HVX-context count. Such coresident grids block participants
-// waiting at a contended barrier.
+// QuRT assigns HVX contexts implicitly. Limit workers to the reported
+// hardware-thread and 128-byte HVX-context counts; these can differ.
 //
 // The pool is spawned ONCE (lazily, on the first dispatch — FastRPC _run is
 // serial, so no init race) and the workers BLOCK on a per-worker semaphore when
@@ -26,7 +25,7 @@
 #include <tl_templates/hexagon/vtcm.h>
 #include <type_traits>
 
-#define TL_MAX_WORKERS 6
+#define TL_MAX_WORKERS 6 // software capacity, not a device resource count
 // 64 KiB a worker: a megakernel's program body and the out-of-line GEMMs it
 // calls take tens of KiB of frames.
 #define TL_WORKER_STACK_SZ (64 * 1024)
@@ -37,22 +36,31 @@
 // to the kernel entry and the host.
 typedef int (*tl_worker_fn)(void *ctx, int wid, int nw);
 
-// Maximum hardware-thread count, clamped to [1, TL_MAX_WORKERS]. This is
-// independent of the number of hardware HVX contexts.
+// Hardware configuration, not currently free resources. Dispatch and pool
+// creation are serial, so cache once per Session. If either query is
+// unavailable, use only the calling thread; this fallback does not claim a
+// detected HVX unit.
 static inline int tl_num_workers(void) {
+  static int workers = 0;
+  if (workers)
+    return workers;
   qurt_sysenv_max_hthreads_t h;
-  if (qurt_sysenv_get_max_hw_threads(&h) != QURT_EOK)
-    return 1;
-  int n = (int)h.max_hthreads;
+  if (qurt_sysenv_get_max_hw_threads(&h) != QURT_EOK || !h.max_hthreads)
+    return workers = 1;
+  int units = qurt_hvx_get_units();
+  unsigned int contexts = units > 0 ? ((unsigned int)units >> 8) & 255u : 0u;
+  if (!contexts)
+    return workers = 1;
+  unsigned int n = h.max_hthreads;
+  if (n > contexts)
+    n = contexts;
   if (n > TL_MAX_WORKERS)
     n = TL_MAX_WORKERS;
-  if (n < 1)
-    n = 1;
-  return n;
+  return workers = (int)n;
 }
 
-// Persistent pool: workers 1..TL_MAX_WORKERS-1 are spawned once; each blocks on
-// its `go` semaphore until the dispatcher releases it for a job, runs the
+// Persistent pool: workers 1..tl_num_workers()-1 are spawned once; each blocks
+// on its `go` semaphore until the dispatcher releases it for a job, runs the
 // shared (fn,ctx,nw), then `up`s `done`.  The dispatcher is the ONLY writer of
 // fn/ctx/nw and writes them only between a worker's previous completion and its
 // next release, so no extra lock is needed: qurt_sem_up/down are out-of-line
@@ -91,7 +99,9 @@ static void tl_pool_worker(void *arg) {
 static void tl_pool_spawn(void) {
   tl_pool.tried =
       1; // attempt once; a failed spawn must not be retried (would leak)
-  int n = TL_MAX_WORKERS - 1; // worker 0 is always the caller
+  int n = tl_num_workers() - 1; // worker 0 is always the caller
+  if (!n)
+    return;
   tl_pool.blob = malloc((size_t)TL_WORKER_STACK_SZ * n);
   if (!tl_pool.blob)
     return; // spawned stays 0 -> tl_parallel falls back to serial inline
@@ -177,8 +187,6 @@ static inline int tl_parallel(tl_worker_fn fn, void *ctx, int nw,
 // A `Coresident` grid runs every program at once, one per worker, so that its
 // programs can meet at tl_grid_sync (T.sync_grid). It fails with TL_ERR_GRID
 // when fewer workers can start than it has programs.
-// Its body receives a final compile-time parking policy, selected once at
-// dispatch. Ordinary grids therefore keep blocking calls out of their bodies.
 struct tl_worker_scope {
   int status = TL_OK;
 };
@@ -212,122 +220,49 @@ static struct {
   int32_t completed;              // barriers every program has passed
   int32_t failed;                 // a program stopped with an error
   int32_t passed[TL_MAX_WORKERS]; // barriers program i has reached, its own
-  bool oversubscribed; // more participants than reported 128-byte HVX contexts
-  uint32_t event;      // changes when registered waiters are notified
-  int32_t waiters;     // participants registered in the blocking path
 } tl_grid;
-
-// Dispatch is serial within a Session, as for pool initialization. Cache the
-// hardware configuration outside worker/poll loops; it does not report how
-// many contexts are currently free. An unavailable query keeps the spin path.
-static int tl_grid_hvx_contexts = -1;
-static inline bool tl_grid_is_oversubscribed(int programs) {
-  if (tl_grid_hvx_contexts < 0) {
-    int units = qurt_hvx_get_units();
-    tl_grid_hvx_contexts = units > 0 ? (units >> 8) & 255 : 0;
-  }
-  return tl_grid_hvx_contexts > 0 && programs > tl_grid_hvx_contexts;
-}
-
-// Publish completion/failure before checking the registered waiters. These
-// operations and the slow waiter's registration/condition reads are all SC:
-// either the publisher sees the waiter, or that waiter sees the publication.
-// Only registered waiters need an event change and a wake.
-template <bool Parking> static inline void tl_grid_notify(void) {
-  static_assert(Parking);
-  if (__atomic_load_n(&tl_grid.waiters, __ATOMIC_SEQ_CST)) {
-    __atomic_fetch_add(&tl_grid.event, 1u, __ATOMIC_SEQ_CST);
-    qurt_futex_wake(&tl_grid.event, TL_MAX_WORKERS);
-  }
-}
-
-// Keep the whole blocking wait out of line so live vector values need saving
-// only once. Read the event before checking the condition: publication before
-// parking then makes the expected value mismatch, rather than losing a wake.
-static __attribute__((noinline, cold)) int32_t
-tl_grid_wait_blocking(int32_t barrier) {
-  __atomic_add_fetch(&tl_grid.waiters, 1, __ATOMIC_SEQ_CST);
-  int32_t status;
-  for (;;) {
-    uint32_t event = __atomic_load_n(&tl_grid.event, __ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&tl_grid.completed, __ATOMIC_SEQ_CST) == barrier) {
-      status = TL_OK;
-      break;
-    }
-    if (__atomic_load_n(&tl_grid.failed, __ATOMIC_SEQ_CST)) {
-      status = TL_ERR_GRID;
-      break;
-    }
-    qurt_futex_wait(&tl_grid.event, static_cast<int32_t>(event));
-  }
-  __atomic_sub_fetch(&tl_grid.waiters, 1, __ATOMIC_SEQ_CST);
-  return status;
-}
 
 // Program `program` of the running coresident grid waits until all its
 // programs reach this call. Memory written before the call, including HVX
-// stores, is visible to every program after it. Ordinary grids retain the
-// pause loop. An oversubscribed grid pauses briefly before blocking to give
-// the scheduler an opportunity to run its remaining participants.
-// A program that fails never arrives; others leave with TL_ERR_GRID.
-template <bool Parking> static inline int32_t tl_grid_sync(int32_t program) {
+// stores, is visible to every program after it. The waiting workers spin and
+// keep their threads, so the barrier costs cache-line transfers, not a
+// wake-up; they pause between polls, as the HMX lock's waiters do, so that the
+// threads still working get the core's issue slots. A program that fails
+// never arrives, so the others leave with TL_ERR_GRID instead of waiting for
+// it.
+static inline int32_t tl_grid_sync(int32_t program) {
   int32_t barrier = ++tl_grid.passed[program];
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
   if (__atomic_add_fetch(&tl_grid.arrived, 1, __ATOMIC_ACQ_REL) ==
       tl_grid.programs) {
     // The last program resets the count before it releases the others.
     __atomic_store_n(&tl_grid.arrived, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&tl_grid.completed, barrier,
-                     Parking ? __ATOMIC_SEQ_CST : __ATOMIC_RELEASE);
-    if constexpr (Parking)
-      tl_grid_notify<Parking>();
+    __atomic_store_n(&tl_grid.completed, barrier, __ATOMIC_RELEASE);
     return TL_OK;
   }
-  if constexpr (!Parking) {
-    while (__atomic_load_n(&tl_grid.completed, __ATOMIC_ACQUIRE) != barrier) {
-      if (__atomic_load_n(&tl_grid.failed, __ATOMIC_RELAXED))
-        return TL_ERR_GRID;
-      asm volatile("pause(#8)");
-    }
-    return TL_OK;
-  } else {
-    for (unsigned polls = 0; polls < 128; ++polls) {
-      if (__atomic_load_n(&tl_grid.completed, __ATOMIC_ACQUIRE) == barrier)
-        return TL_OK;
-      if (__atomic_load_n(&tl_grid.failed, __ATOMIC_RELAXED))
-        return TL_ERR_GRID;
-      asm volatile("pause(#8)");
-    }
-    return tl_grid_wait_blocking(barrier);
+  while (__atomic_load_n(&tl_grid.completed, __ATOMIC_ACQUIRE) != barrier) {
+    if (__atomic_load_n(&tl_grid.failed, __ATOMIC_RELAXED))
+      return TL_ERR_GRID;
+    asm volatile("pause(#8)");
   }
+  return TL_OK;
 }
 
-template <typename Scope, typename Body, bool Coresident>
-struct tl_parallel_for_job {
+template <typename Scope, typename Body> struct tl_parallel_for_job {
   Body *body;
   int32_t extent;
   tl_worker_arenas arenas;
 
-  template <bool Parking> static int run(void *ctx, int wid, int nw) {
+  static int run(void *ctx, int wid, int nw) {
     tl_parallel_for_job *job = static_cast<tl_parallel_for_job *>(ctx);
     Scope scope;
     int status = scope.status;
     uint8_t *arena = job->arenas.base + (size_t)wid * job->arenas.bytes;
-    for (int32_t i = wid; status == TL_OK && i < job->extent; i += nw) {
-      if constexpr (Coresident)
-        status =
-            (*job->body)(i, arena, std::integral_constant<bool, Parking>{});
-      else
-        status = (*job->body)(i, arena);
-    }
+    for (int32_t i = wid; status == TL_OK && i < job->extent; i += nw)
+      status = (*job->body)(i, arena);
     // Programs waiting at a barrier for a failed one stop (tl_grid_sync).
-    if (status != TL_OK) {
-      __atomic_store_n(&tl_grid.failed, 1,
-                       Coresident && Parking ? __ATOMIC_SEQ_CST
-                                             : __ATOMIC_RELAXED);
-      if constexpr (Coresident && Parking)
-        tl_grid_notify<Parking>();
-    }
+    if (status != TL_OK)
+      __atomic_store_n(&tl_grid.failed, 1, __ATOMIC_RELAXED);
     return status;
   }
 };
@@ -347,41 +282,26 @@ static inline int tl_parallel_for(int32_t extent, int max_workers,
     nw = (int)arenas.count;
   if (nw > extent)
     nw = (int)extent;
-  // No participant from a previous dispatch remains after tl_parallel joins.
   if (Coresident) {
-    tl_grid.oversubscribed = tl_grid_is_oversubscribed(extent);
     if (nw < extent)
       return TL_ERR_GRID;
     tl_grid.programs = extent;
     tl_grid.arrived = 0;
     tl_grid.completed = 0;
     tl_grid.failed = 0;
-    tl_grid.event = 0;
-    tl_grid.waiters = 0;
     for (int i = 0; i < TL_MAX_WORKERS; ++i)
       tl_grid.passed[i] = 0;
   }
-  // Select one specialization for every participant before releasing workers.
-  // Keep the shared job alive until tl_parallel has joined all participants.
-  using Job =
-      tl_parallel_for_job<Scope, typename std::remove_reference<Body>::type,
-                          Coresident>;
-  Job job{&body, extent, arenas};
-  tl_worker_fn fn = &Job::template run<false>;
-  if constexpr (Coresident) {
-    if (tl_grid.oversubscribed)
-      fn = &Job::template run<true>;
-  }
-  return tl_parallel(fn, &job, nw, Coresident);
+  tl_parallel_for_job<Scope, typename std::remove_reference<Body>::type> job{
+      &body, extent, arenas};
+  return tl_parallel(job.run, &job, nw, Coresident);
 }
 
 template <typename Scope = tl_worker_scope, bool Coresident = false,
           typename Body>
 static inline int tl_parallel_for(int32_t extent, int max_workers,
                                   Body &&body) {
-  auto program = [&body](int32_t i, uint8_t *, auto... policy) {
-    return body(i, policy...);
-  };
+  auto program = [&body](int32_t i, uint8_t *) { return body(i); };
   return tl_parallel_for<Scope, Coresident>(
       extent, max_workers, tl_worker_arenas{nullptr, 0u, TL_MAX_WORKERS},
       program);
