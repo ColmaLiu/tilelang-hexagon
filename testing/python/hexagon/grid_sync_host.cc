@@ -141,15 +141,18 @@ static void release_control() {
   hold_entry = hold_return = false;
   control.notify_all();
 }
+template <bool Parking>
 static void fail_program(int program, int participants) {
   std::array<uint8_t, 6> arenas{};
-  auto fail = [&](int index, uint8_t *arena) {
+  auto fail = [&](int index, uint8_t *arena, auto policy) {
+    static_assert(decltype(policy)::value == Parking);
     assert(index == program && arena == arenas.data() + program);
     return 37;
   };
   tl_parallel_for_job<tl_worker_scope, decltype(fail), true> job{
       &fail, participants, {arenas.data(), 1, 6}};
-  assert(decltype(job)::run(&job, program, participants) == 37);
+  assert(decltype(job)::template run<Parking>(&job, program, participants) ==
+         37);
 }
 static void check_gate(int contexts) {
   hardware_units = contexts << 8;
@@ -161,21 +164,23 @@ static void check_gate(int contexts) {
     assert(tl_grid_is_oversubscribed(n) == (contexts > 0 && n > contexts));
   assert(hardware_queries == 1 && pauses == 0 && entries == 0);
 }
+template <bool Parking>
 static void check_visibility(int participants, int contexts,
                              bool spurious = false) {
   initialize(participants, contexts);
   const bool blocking = participants > contexts;
+  assert(blocking == Parking && tl_grid.oversubscribed == Parking);
   spurious_budget = spurious ? 7 : 0;
   std::array<int, 6> values{};
   std::vector<std::thread> threads;
   auto body = [&](int worker) {
     for (int round = 1; round <= 64; ++round) {
       values[worker] = round * 100 + worker;
-      assert(tl_grid_sync(worker) == TL_OK);
+      assert(tl_grid_sync<Parking>(worker) == TL_OK);
       for (int other = 0; other < participants; ++other)
         assert(values[other] == round * 100 + other);
       // Keep the next round's writes after every reader has finished.
-      assert(tl_grid_sync(worker) == TL_OK);
+      assert(tl_grid_sync<Parking>(worker) == TL_OK);
     }
   };
   for (int worker = 0; worker < participants - 1; ++worker)
@@ -195,9 +200,9 @@ static void check_spin_failure() {
   std::vector<std::thread> threads;
   for (int worker = 0; worker < 5; ++worker)
     threads.emplace_back(
-        [&, worker] { status[worker] = tl_grid_sync(worker); });
+        [&, worker] { status[worker] = tl_grid_sync<false>(worker); });
   await([] { return pauses != 0; });
-  fail_program(5, 6);
+  fail_program<false>(5, 6);
   for (auto &thread : threads)
     thread.join();
   for (int result : status)
@@ -210,15 +215,15 @@ static void check_publication(bool before_park, bool failure,
   hold_entry = before_park;
   hold_return = completed_first;
   int status = -1;
-  std::thread waiter([&] { status = tl_grid_sync(0); });
+  std::thread waiter([&] { status = tl_grid_sync<true>(0); });
   await([before_park] { return before_park ? entries != 0 : parked != 0; });
   // The waiter has registered in the production helper, but either has not
   // entered the atomic compare-and-enqueue yet or is already asleep there.
   assert(__atomic_load_n(&tl_grid.waiters, __ATOMIC_SEQ_CST) == 1);
   if (!failure || completed_first)
-    assert(tl_grid_sync(1) == TL_OK);
+    assert(tl_grid_sync<true>(1) == TL_OK);
   if (failure)
-    fail_program(1, 2);
+    fail_program<true>(1, 2);
   release_control();
   waiter.join();
   assert(status == (failure && !completed_first ? TL_ERR_GRID : TL_OK));
@@ -230,7 +235,7 @@ static void check_completed_spin() {
   initialize(6, 6);
   tl_grid.completed = 1;
   tl_grid.failed = 1;
-  assert(tl_grid_sync(0) == TL_OK && entries == 0);
+  assert(tl_grid_sync<false>(0) == TL_OK && entries == 0);
 }
 
 int main(int argc, char **argv) {
@@ -243,13 +248,13 @@ int main(int argc, char **argv) {
   else if (test == "gate-six")
     check_gate(6);
   else if (test == "visible-four")
-    check_visibility(4, 4);
+    check_visibility<false>(4, 4);
   else if (test == "visible-six-spin")
-    check_visibility(6, 6);
+    check_visibility<false>(6, 6);
   else if (test == "visible-six-blocking")
-    check_visibility(6, 4);
+    check_visibility<true>(6, 4);
   else if (test == "spurious-returns")
-    check_visibility(6, 4, true);
+    check_visibility<true>(6, 4, true);
   else if (test == "failed-spin")
     check_spin_failure();
   else if (test == "failed-before-park")

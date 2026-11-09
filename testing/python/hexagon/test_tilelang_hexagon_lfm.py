@@ -199,7 +199,7 @@ def test_decode_is_one_cycle_of_phases(tiny_bundle):
         art = tilelang.lower(make_decode(c, shapes, 256, 64), target=target, enable_host_codegen=False, enable_device_compile=False)
     source = art.kernel_source
     # Four barriers a layer and one after the head; the GEMVs are calls.
-    assert source.count("tl_grid_sync(") == 4 * c.layers + 1
+    assert source.count("tl_grid_sync<") == 4 * c.layers + 1
     assert "TL_GEMM" not in source and "tl_hvx_gemm_int_scaled<" in source
 
 
@@ -308,7 +308,7 @@ def test_fp16_decode_is_one_step_of_phases(model, fp16_bundle):
     source = art.kernel_source
     # Four barriers a layer and one after the head; the GEMVs are calls of
     # the weight-layout GEMV.
-    assert source.count("tl_grid_sync(") == 4 * c.layers + 1
+    assert source.count("tl_grid_sync<") == 4 * c.layers + 1
     assert "tl_hvx_gemm_weight<" in source and "TL_GEMM" not in source
 
 
@@ -329,7 +329,7 @@ def test_fp16_stages_split_the_layers(fp16_bundle):
                 decode_fp16.make_decode(c, 256, 64, layers), target=target, enable_host_codegen=False, enable_device_compile=False
             )
         # Four barriers a layer, and one after the head in the last stage.
-        assert art.kernel_source.count("tl_grid_sync(") == 4 * len(layers) + (layers.stop == c.layers)
+        assert art.kernel_source.count("tl_grid_sync<") == 4 * len(layers) + (layers.stop == c.layers)
     ((_, source, _, _),) = lower_kernels([(prefill_fp16.make_prefill(c, 128, 256, 64, range(1, 3)), [])], target=FP16_SOURCE_TARGET)
     assert source.count("for (int32_t layer = 0; layer < 2; ++layer)") == 1
 

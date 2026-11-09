@@ -222,8 +222,11 @@ def test_programs_meet_at_sync_grid():
     source = _lower(_rotate(4, 3, 4)).kernel_source
     # The programs run coresident, one per worker, and wait at the barrier
     # with their own program index.
-    assert "tl_parallel_for<tl_worker_scope, true>(4, 4, [&](int32_t bx) TL_HEXAGON_IEEE_ARITHMETIC -> int32_t {" in source
-    assert source.count("if (int32_t tl_status = tl_grid_sync(bx)) return tl_status;") == 1
+    assert (
+        "tl_parallel_for<tl_worker_scope, true>(4, 4, [&](int32_t bx, auto tl_grid_policy) TL_HEXAGON_IEEE_ARITHMETIC -> int32_t {"
+        in source
+    )
+    assert source.count("if (int32_t tl_status = tl_grid_sync<decltype(tl_grid_policy)::value>(bx)) return tl_status;") == 1
 
 
 def test_sync_grid_needs_a_worker_per_program():
@@ -305,7 +308,7 @@ def test_global_vtcm_buffers_come_before_the_program_arenas():
     head = source[: source.index("tl_parallel_for")]
     # A, 64 KB, then the programs' arenas after it.
     assert "half* a = (half*)tl_exclusive(tl_vtcm_arena() + 0);" in head
-    assert "tl_vtcm_worker_arenas(" in source and ", 65536u), [&](int32_t bx, uint8_t *tl_arena)" in source
+    assert "tl_vtcm_worker_arenas(" in source and ", 65536u), [&](int32_t bx, uint8_t *tl_arena, auto tl_grid_policy)" in source
     # A program takes the buffer and the arguments it reaches as objects of
     # their own.
     assert "half* a_w = (half*)tl_exclusive(a);" in source and "tl_escape(a_w);" in source
