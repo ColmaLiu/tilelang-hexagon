@@ -237,20 +237,77 @@ def test_sync_grid_in_one_program_has_nothing_to_wait_for():
     assert "tl_parallel_for" not in source
 
 
+@pytest.fixture(scope="module")
+def device_worker_limit():
+    if os.environ.get("TL_HEXAGON_DEVICE_TEST") != "1":
+        pytest.skip("requires an authorized Hexagon device and SDK")
+    from tilelang.engine.param import KernelParam
+    from tilelang.hexagon.runtime.session import Session
+
+    # Query the device independently of worker.h. Architecture names do not
+    # specify the number of 128-byte HVX contexts on a particular SoC.
+    source = """#include <stdint.h>
+#include <qurt.h>
+int32_t worker_limits(int32_t* out) {
+  qurt_sysenv_max_hthreads_t h = {};
+  out[0] = qurt_sysenv_get_max_hw_threads(&h);
+  out[1] = h.max_hthreads;
+  out[2] = qurt_hvx_get_units();
+  out[3] = QURT_MAX_HTHREAD_LIMIT;
+  return 0;
+}
+"""
+    with Session.of_lowered([("worker_limits", source, [KernelParam("int32", [4])], [0])]) as session:
+        status, hardware, units, capacity = session.kernels[0]().tolist()
+    contexts = (units >> 8) & 255 if units > 0 else 0
+    assert capacity > 0
+    return min(capacity, hardware, contexts) if status == 0 and hardware > 0 and contexts > 0 else 1
+
+
+def _check_capped_grid(func, arguments, out_idx, expected, programs, worker_limit):
+    import torch
+    from tilelang.hexagon.runtime.session import Session, _KernelError
+
+    # Resident arguments make every write observable even when the kernel
+    # returns an error. Keep the original numeric assertion on supported grids.
+    initial = [value.contiguous().numpy().tobytes() for value in arguments]
+    guard = bytes([0xA5]) * 128
+    with Session([(func, [out_idx])]) as session:
+        buffers = [session.buffer(len(raw) + len(guard)) for raw in initial]
+        for buffer, raw in zip(buffers, initial):
+            buffer.write(raw + guard)
+        if programs > worker_limit:
+            with pytest.raises(_KernelError, match=r"^Hexagon session: .* failed: TL_ERR_GRID \(too few workers for the grid\)$"):
+                session.kernels[0](*buffers)
+            # No callback should start: output, scratch rows and input stay
+            # byte-identical, including the extra bytes outside each parameter.
+            assert [buffer.read() for buffer in buffers] == [raw + guard for raw in initial]
+        else:
+            session.kernels[0](*buffers)
+            raw = [buffer.read() for buffer in buffers]
+            assert all(value[-128:] == guard for value in raw)
+            assert raw[0][:-128] == initial[0]
+            result = torch.frombuffer(bytearray(raw[out_idx][:-128]), dtype=expected.dtype).reshape(expected.shape)
+            torch.testing.assert_close(result, expected)
+
+
 @pytest.mark.skipif(os.environ.get("TL_HEXAGON_DEVICE_TEST") != "1", reason="requires an authorized Hexagon device and SDK")
-@pytest.mark.parametrize("programs", [2, 6])
-def test_programs_exchange_rows_across_sync_grid(programs):
+@pytest.mark.parametrize("programs,num_workers", [(2, 2), (4, 4), (4, 6), (4, 8), (6, 6), (8, 8)])
+def test_programs_exchange_rows_across_sync_grid(programs, num_workers, device_worker_limit):
     import torch
 
     rounds = 61
-    kernel = tilelang.compile(_rotate(programs, rounds, programs), out_idx=[2], target="hexagon")
-    try:
-        a = torch.randn(programs, 64)
-        rows = torch.zeros(2, programs, 64)
-        expected = torch.roll(a, -rounds, dims=0) + rounds
-        torch.testing.assert_close(kernel(a, rows), expected)
-    finally:
-        kernel.adapter.close()
+    a = torch.randn(programs, 64)
+    rows = torch.zeros(2, programs, 64)
+    expected = torch.roll(a, -rounds, dims=0) + rounds
+    _check_capped_grid(
+        _rotate(programs, rounds, num_workers),
+        [a, rows, torch.full_like(a, -123)],
+        2,
+        expected,
+        programs,
+        device_worker_limit,
+    )
 
 
 def _grid_rotate(programs, rounds):
@@ -336,16 +393,20 @@ def test_global_vtcm_buffers_must_fit_with_the_arenas(arch):
 
 
 @pytest.mark.skipif(os.environ.get("TL_HEXAGON_DEVICE_TEST") != "1", reason="requires an authorized Hexagon device and SDK")
-def test_programs_exchange_rows_through_global_vtcm():
+@pytest.mark.parametrize("programs", [4, 6])
+def test_programs_exchange_rows_through_global_vtcm(programs, device_worker_limit):
     import torch
 
-    programs, rounds = 6, 61
-    kernel = tilelang.compile(_grid_rotate(programs, rounds), out_idx=[1], target="hexagon")
-    try:
-        a = torch.randn(programs, 64)
-        torch.testing.assert_close(kernel(a), torch.roll(a, -rounds, dims=0) + rounds)
-    finally:
-        kernel.adapter.close()
+    rounds = 61
+    a = torch.randn(programs, 64)
+    _check_capped_grid(
+        _grid_rotate(programs, rounds),
+        [a, torch.full_like(a, -123)],
+        1,
+        torch.roll(a, -rounds, dims=0) + rounds,
+        programs,
+        device_worker_limit,
+    )
 
 
 @pytest.mark.skipif(os.environ.get("TL_HEXAGON_DEVICE_TEST") != "1", reason="requires an authorized Hexagon device and SDK")
@@ -383,17 +444,16 @@ def _prefetch(programs, n):
 
 
 @pytest.mark.skipif(os.environ.get("TL_HEXAGON_DEVICE_TEST") != "1", reason="requires an authorized Hexagon device and SDK")
-def test_dma_crosses_sync_grid():
+@pytest.mark.parametrize("programs", [4, 6])
+def test_dma_crosses_sync_grid(programs, device_worker_limit):
     import torch
 
-    programs, n = 6, 4096
-    kernel = tilelang.compile(_prefetch(programs, n), out_idx=[2], target="hexagon")
-    try:
-        a = torch.randn(programs, n)
-        expected = a + ((torch.arange(programs) + 1) % programs).float()[:, None]
-        torch.testing.assert_close(kernel(a, torch.zeros(programs, 64)), expected)
-    finally:
-        kernel.adapter.close()
+    n = 4096
+    a = torch.randn(programs, n)
+    expected = a + ((torch.arange(programs) + 1) % programs).float()[:, None]
+    _check_capped_grid(
+        _prefetch(programs, n), [a, torch.zeros(programs, 64), torch.full_like(a, -123)], 2, expected, programs, device_worker_limit
+    )
 
 
 @pytest.mark.skipif(os.environ.get("TL_HEXAGON_DEVICE_TEST") != "1", reason="requires an authorized Hexagon device and SDK")

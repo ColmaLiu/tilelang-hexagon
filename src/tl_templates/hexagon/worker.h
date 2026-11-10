@@ -4,9 +4,8 @@
 // The Hexagon DSP has a few HW threads, each able to issue HVX (and,
 // time-shared, HMX) instructions.  tl_parallel runs a callback on `nw` workers:
 // worker 0 on the CALLING thread, 1..nw-1 on a PERSISTENT pool of qurt threads.
-// Following the htp-ops-lib pattern we NEVER qurt_hvx_lock — we never spawn
-// more HVX-using workers than there are HVX contexts (= HW threads), so QuRT
-// assigns each an HVX context implicitly and they're never oversubscribed.
+// QuRT assigns HVX contexts implicitly. Limit workers to the reported
+// hardware-thread and 128-byte HVX-context counts; these can differ.
 //
 // The pool is spawned ONCE (lazily, on the first dispatch — FastRPC _run is
 // serial, so no init race) and the workers BLOCK on a per-worker semaphore when
@@ -26,7 +25,8 @@
 #include <tl_templates/hexagon/vtcm.h>
 #include <type_traits>
 
-#define TL_MAX_WORKERS 6
+// QuRT's cross-target array capacity, not the current device's worker count.
+static constexpr int TL_MAX_WORKERS = QURT_MAX_HTHREAD_LIMIT;
 // 64 KiB a worker: a megakernel's program body and the out-of-line GEMMs it
 // calls take tens of KiB of frames.
 #define TL_WORKER_STACK_SZ (64 * 1024)
@@ -37,23 +37,31 @@
 // to the kernel entry and the host.
 typedef int (*tl_worker_fn)(void *ctx, int wid, int nw);
 
-// Number of HW threads available, clamped to [1, TL_MAX_WORKERS].  This is the
-// worker count: == HVX context count on the target, so HVX is never
-// oversubscribed.
+// Hardware configuration, not currently free resources. Dispatch and pool
+// creation are serial, so cache once per Session. If either query is
+// unavailable, use only the calling thread; this fallback does not claim a
+// detected HVX unit.
 static inline int tl_num_workers(void) {
+  static int workers = 0;
+  if (workers)
+    return workers;
   qurt_sysenv_max_hthreads_t h;
-  if (qurt_sysenv_get_max_hw_threads(&h) != QURT_EOK)
-    return 1;
-  int n = (int)h.max_hthreads;
+  if (qurt_sysenv_get_max_hw_threads(&h) != QURT_EOK || !h.max_hthreads)
+    return workers = 1;
+  int units = qurt_hvx_get_units();
+  unsigned int contexts = units > 0 ? ((unsigned int)units >> 8) & 255u : 0u;
+  if (!contexts)
+    return workers = 1;
+  unsigned int n = h.max_hthreads;
+  if (n > contexts)
+    n = contexts;
   if (n > TL_MAX_WORKERS)
     n = TL_MAX_WORKERS;
-  if (n < 1)
-    n = 1;
-  return n;
+  return workers = (int)n;
 }
 
-// Persistent pool: workers 1..TL_MAX_WORKERS-1 are spawned once; each blocks on
-// its `go` semaphore until the dispatcher releases it for a job, runs the
+// Persistent pool: workers 1..tl_num_workers()-1 are spawned once; each blocks
+// on its `go` semaphore until the dispatcher releases it for a job, runs the
 // shared (fn,ctx,nw), then `up`s `done`.  The dispatcher is the ONLY writer of
 // fn/ctx/nw and writes them only between a worker's previous completion and its
 // next release, so no extra lock is needed: qurt_sem_up/down are out-of-line
@@ -92,7 +100,9 @@ static void tl_pool_worker(void *arg) {
 static void tl_pool_spawn(void) {
   tl_pool.tried =
       1; // attempt once; a failed spawn must not be retried (would leak)
-  int n = TL_MAX_WORKERS - 1; // worker 0 is always the caller
+  int n = tl_num_workers() - 1; // worker 0 is always the caller
+  if (!n)
+    return;
   tl_pool.blob = malloc((size_t)TL_WORKER_STACK_SZ * n);
   if (!tl_pool.blob)
     return; // spawned stays 0 -> tl_parallel falls back to serial inline
