@@ -1,0 +1,103 @@
+// Complete normal entries remain separate; only the caller owns clocks/cache preparation.
+#include <qurt.h>
+#include <stdint.h>
+#include <string.h>
+
+static inline __attribute__((always_inline)) uint64_t flash_ticks() {
+  uint64_t x;
+  asm volatile("%0 = c31:30" : "=r"(x) :: "memory");
+  return x;
+}
+static inline __attribute__((always_inline)) uint64_t flash_cycles() {
+  uint64_t x;
+  asm volatile("%0 = c15:14" : "=r"(x) :: "memory");
+  return x;
+}
+static inline __attribute__((always_inline)) void flash_complete() {
+  asm volatile("syncht" ::: "memory");
+}
+static bool flash_guard(const uint8_t* p, unsigned n) {
+  for (unsigned i = 0; i < n; ++i) if (p[i] != 0xa5) return false;
+  return true;
+}
+// Every 32-byte line is read in a fixed Q,K,V order. This specifies preparation,
+// not guaranteed physical residency in a particular cache level.
+static uint32_t flash_read_prepare(const void* address, unsigned n) {
+  const volatile uint32_t* p = static_cast<const volatile uint32_t*>(address);
+  uint32_t sum = 0;
+  for (unsigned i = 0; i < n / sizeof(uint32_t); i += 8) sum += p[i];
+  return sum;
+}
+using flash_fn = int32_t (*)(half*, half*, half*, half*);
+extern "C" int32_t flash_compare(int32_t cache, int32_t mode,
+                                 int32_t start, half* Q, half* K, half* V,
+                                 half* O, uint8_t* Snapshots, int64_t* Records) {
+  constexpr int pair = 1;
+  if (cache < 0 || cache > 1 ||
+      mode < 0 || mode > 2 || start < 0 || start > 1) return TL_ERR_GRID;
+  constexpr unsigned max_high = @MAX_HIGH@, qbytes = 8192, kvbytes = @KV_BYTES@;
+  constexpr unsigned outbytes = 8192, snapbytes = 8448;
+  uint8_t* arena = static_cast<uint8_t*>(tl_vtcm_arena());
+  const unsigned grant = tl_vtcm_arena_bytes();
+  // Must precede all arena writes and calls to any normal body.
+  if (!arena || reinterpret_cast<uintptr_t>(arena) % 2048 ||
+      grant < max_high + 128) return TL_ERR_VTCM;
+  if ((reinterpret_cast<uintptr_t>(Q) | reinterpret_cast<uintptr_t>(K) |
+       reinterpret_cast<uintptr_t>(V) | reinterpret_cast<uintptr_t>(O)) % 128)
+    return TL_ERR_GRID;
+  qurt_sysenv_max_hthreads_t hw = {};
+  const int query = qurt_sysenv_get_max_hw_threads(&hw), hvx = qurt_hvx_get_units();
+  if (query || !hw.max_hthreads || hvx <= 0 || !((hvx >> 8) & 255))
+    return TL_ERR_GRID;
+  const flash_fn funcs[] = {tl_session_kernel_0, tl_session_kernel_1};
+  const unsigned highs[] = {@HIGH_A@, @HIGH_B@};
+  uint8_t* output_allocation = reinterpret_cast<uint8_t*>(O) - 128;
+  // Fixed 4-entry warmup ABBA, then measured ABBA + BAAB. Never data-dependent.
+  for (int i = 0; i < 12; ++i) {
+    const int within = i % 4;
+    const int logical = ((within == 0 || within == 3) ? 0 : 1) ^ (i >= 8) ^ start;
+    const int variant = mode == 0 ? (logical ? pair : 0) : (mode == 1 ? 0 : pair);
+    flash_fn fn = funcs[variant];
+    asm volatile("" : "+r"(fn));  // Keep the measured call through this recorded pointer.
+    const unsigned high = highs[variant];
+    uint64_t* r = reinterpret_cast<uint64_t*>(Records) + i * 40;
+    memset(output_allocation, 0xa5, snapbytes);
+    memset(arena, 0xa5, max_high + 128);
+    r[0] = 0x750116; r[1] = @SEQ@; r[2] = pair; r[3] = cache;
+    r[4] = mode; r[5] = start; r[6] = i; r[7] = logical; r[8] = variant;
+    r[12] = reinterpret_cast<uintptr_t>(fn);
+    r[13] = reinterpret_cast<uintptr_t>(arena); r[14] = grant; r[15] = high;
+    r[16] = reinterpret_cast<uintptr_t>(Q); r[17] = reinterpret_cast<uintptr_t>(K);
+    r[18] = reinterpret_cast<uintptr_t>(V); r[19] = reinterpret_cast<uintptr_t>(O);
+    r[23] = query; r[24] = hw.max_hthreads; r[25] = hvx;
+    r[26] = QURT_MAX_HTHREAD_LIMIT; r[27] = outbytes;
+    r[33] = i < 4;
+    if (cache == 0) {
+      uint32_t sum = flash_read_prepare(Q, qbytes);
+      sum += flash_read_prepare(K, kvbytes);
+      sum += flash_read_prepare(V, kvbytes);
+      r[29] = sum;
+    } else {
+      r[30] = qurt_mem_cache_clean(reinterpret_cast<qurt_addr_t>(Q), qbytes,
+                                 QURT_MEM_CACHE_FLUSH_INVALIDATE, QURT_MEM_DCACHE);
+      r[31] = qurt_mem_cache_clean(reinterpret_cast<qurt_addr_t>(K), kvbytes,
+                                 QURT_MEM_CACHE_FLUSH_INVALIDATE, QURT_MEM_DCACHE);
+      r[32] = qurt_mem_cache_clean(reinterpret_cast<qurt_addr_t>(V), kvbytes,
+                                 QURT_MEM_CACHE_FLUSH_INVALIDATE, QURT_MEM_DCACHE);
+      if (r[30] || r[31] || r[32]) return TL_ERR_GRID;
+    }
+    flash_complete();  // setup/cache completion is outside the interval
+    const uint64_t t0 = flash_ticks(), c0 = flash_cycles();
+    const int32_t status = fn(Q, K, V, O);
+    flash_complete();  // normal entry's output stores complete inside the interval
+    const uint64_t c1 = flash_cycles(), t1 = flash_ticks();
+    r[9] = status; r[10] = (t1 - t0) & ((UINT64_C(1) << 56) - 1); r[11] = c1 - c0;
+    r[20] = flash_guard(output_allocation, 128);
+    r[21] = flash_guard(output_allocation + 128 + outbytes, 128);
+    r[22] = flash_guard(arena + high, max_high + 128 - high);
+    memcpy(Snapshots + i * snapbytes, output_allocation, snapbytes);
+    if (status) return status;
+    if (!r[20] || !r[21] || !r[22]) return TL_ERR_VTCM;
+  }
+  return TL_OK;
+}

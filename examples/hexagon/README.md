@@ -48,6 +48,11 @@ python example_gemv_w4a16.py --k 2048 --n 8192
 Each prints its error against a torch reference and `PASS` or `FAIL`. The LFM example
 has its own [README](lfm/README.md).
 
+For controlled Flash attention performance comparisons, see the
+[Flash attention benchmark](flash_attention_bench/README.md). It pairs the current
+Crouton example with a staged layout control, retains A/A measurements and raw
+outputs, and qualifies every output against an FP64 reference before reporting timing.
+
 ## Device tests
 
 `TL_HEXAGON_DEVICE_TEST=1` enables the device tests in `testing/python/hexagon`.
