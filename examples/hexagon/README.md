@@ -54,6 +54,8 @@ has its own [README](lfm/README.md).
 Building kernels takes most of their time, so they can run in parallel workers
 (pytest-xdist) that share a device lock: an adapter holds the lock from deployment
 to `close()`, so one session at a time uses the device while the other workers build.
+On a device with two cDSPs, `TL_HEXAGON_DOMAINS=3,4` runs the concurrent-session
+test on both; by default it opens both sessions on `TILELANG_HEXAGON_DOMAIN`.
 
 ```bash
 TL_HEXAGON_DEVICE_TEST=1 TILELANG_HEXAGON_DEVICE_LOCK=/tmp/tl_hexagon_device.lock \

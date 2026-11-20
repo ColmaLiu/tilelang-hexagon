@@ -109,7 +109,8 @@ These are the decisions that keep the adaptation small and the code navigable.
   BSPs (`linux_runtime.py`) use SSH when `TILELANG_HEXAGON_SSH_HOST` is set, or ADB
   otherwise. `OneShotKernel` provides a Linux compatibility path for one-shot
   execution. Callers must serialize all operations on a `Session`, including
-  buffer operations. Each SSH file upload, download and deployment directory
+  buffer operations. A Session runs on one DSP, its FastRPC domain (Section 8,
+  Sessions). Each SSH file upload, download and deployment directory
   creation has a 600-second timeout. Increase `TILELANG_HEXAGON_SSH_TRANSFER_TIMEOUT`
   for large models or slow links, or pass `transfer_timeout` to `LinuxConnection`.
   The value must be finite and positive; it is captured when the connection is
@@ -517,6 +518,12 @@ barrier and does not release resources or drain DMA. See the
   - **Cost.** A call costs ~2.4 ms with resident arguments, of which the FastRPC call
     is 0.25–0.4 ms. `Session.last_run_seconds()` reports the agent's timing of the
     last call.
+  - **Domains.** A Session runs on one DSP: `Session(..., domain=d)` picks its
+    FastRPC domain, `TILELANG_HEXAGON_DOMAIN` by default. The SA8650 has two cDSPs,
+    domains 3 and 4; Sessions on both, called from two threads, run at the same
+    time (two 2048³ HMX GEMMs: 43.9 ms, against 81.5 ms one after the other). The
+    cDSPs share no VTCM, addresses or caches, so data passes between their
+    Sessions through the host.
 
 ---
 
