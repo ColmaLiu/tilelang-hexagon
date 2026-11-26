@@ -154,7 +154,15 @@ def test_rank_zero_buffer_abi_survives_parameter_serialization(monkeypatch):
     old_records = [{"dtype": str(p.dtype), "shape": p.shape} for p in params]
     old_text = tvm.ir.save_json(tvm.runtime.convert(old_records))
     assert load_kernel_params(old_text)[1].is_scalar()  # Historical shape-only convention.
-    for restored in (params, load_kernel_params(dump_kernel_params(params)), load_kernel_params(old_text, func=rank_zero)):
+    cached = dump_kernel_params(params, func=rank_zero)
+    assert [i for i, record in enumerate(tvm.ir.load_json(cached)) if "is_buffer" in record] == [1, 3]
+    for restored in (
+        params,
+        load_kernel_params(dump_kernel_params(params)),
+        load_kernel_params(cached),
+        load_kernel_params(cached, func=rank_zero),
+        load_kernel_params(old_text, func=rank_zero),
+    ):
         plans = fastrpc._plan(restored, [3])
         assert [(p.is_scalar, p.nbytes, p.is_output) for p in plans] == [
             (False, 24, False),
