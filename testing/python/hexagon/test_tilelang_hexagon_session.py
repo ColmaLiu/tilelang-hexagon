@@ -97,6 +97,63 @@ def _exp(fast: bool):
     return kernel
 
 
+def _strided_copy(src_strides, dst_strides):
+    @T.prim_func
+    def copy(x: T.StridedTensor((3, 2), src_strides, "float32"), y: T.StridedTensor((3, 2), dst_strides, "float32")):
+        with T.Kernel(1):
+            for i, j in T.grid(3, 2):
+                y[i, j] = x[i, j]
+
+    return copy
+
+
+def test_dense_transfer_layout_after_parameter_serialization():
+    from tilelang.engine.param import KernelParam, dump_kernel_params, load_kernel_params
+    from tilelang.hexagon.runtime.tensor import pack_buffer, unpack_buffer
+
+    ((_, _, params, _),) = session.lower_kernels([(_strided_copy((1, 3), (2, 1)), [1])])
+    transposed, contiguous, legacy = load_kernel_params(dump_kernel_params([*params, KernelParam("float32", [3, 2])]))
+    plans = fastrpc._plan([transposed, contiguous, legacy], [])
+    backing = torch.arange(12, dtype=torch.float32).reshape(2, 6)[:, 1::2]
+    logical = backing.T
+    for data in (logical, logical.contiguous(), logical.numpy()):
+        raw = pack_buffer(data, transposed, plans[0], "copy")
+        assert raw == backing.contiguous().numpy().tobytes()
+        restored = unpack_buffer(raw, transposed)
+        assert restored.stride() == (1, 3)
+        torch.testing.assert_close(restored, logical)
+    assert plans[1].storage_axes == plans[2].storage_axes == ()
+    for strides, elements in [([1, 1], 4), ([4, 1], 10)]:
+        param = KernelParam("float32", [3, 2], strides)
+        (plan,) = fastrpc._plan([param], [])
+        assert plan.nbytes == elements * 4  # resident buffer bounds include any holes
+        assert pack_buffer(bytes(plan.nbytes), param, plan, "copy") == bytes(plan.nbytes)
+        with pytest.raises(ValueError, match=f"kernel takes {plan.nbytes}"):
+            pack_buffer(bytes(plan.nbytes - 1), param, plan, "copy")
+        with pytest.raises(NotImplementedError, match="non-dense"):
+            pack_buffer(logical, param, plan, "copy")
+
+    empty = KernelParam("float32", [2, 0, 3], [3, 3, 1])
+    assert fastrpc._plan([empty], [0])[0].nbytes == 0
+    assert unpack_buffer(b"", empty).shape == (2, 0, 3)
+
+
+@DEVICE
+@pytest.mark.parametrize(("src_strides", "dst_strides"), [((1, 3), (2, 1)), ((2, 1), (1, 3))])
+def test_jit_copies_dense_strided_tensors(src_strides, dst_strides):
+    import tilelang
+    from tilelang.hexagon.runtime.adapter import HexagonKernelAdapter
+
+    x = torch.arange(6, dtype=torch.float32).reshape(2, 3).T
+    try:
+        kernel = tilelang.compile(_strided_copy(src_strides, dst_strides), target="hexagon", out_idx=1)
+        y = kernel(x)
+        assert y.stride() == dst_strides
+        torch.testing.assert_close(y, x)
+    finally:
+        HexagonKernelAdapter.close_all()
+
+
 def test_session_kernels_lower_under_their_own_pass_configs():
     (_, fast, _, _), (_, accurate, _, _) = session.lower_kernels([(_exp(True), [1]), (_exp(False), [1])])
     assert "tl_hvx_exp_fast(" in fast
