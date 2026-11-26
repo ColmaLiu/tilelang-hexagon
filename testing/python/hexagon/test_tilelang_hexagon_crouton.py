@@ -34,6 +34,45 @@ def _source(func):
         return str(tilelang.lower(func, target=target, enable_host_codegen=False, enable_device_compile=False).kernel_source)
 
 
+@pytest.mark.parametrize("kind", ["activation", "weight_t"])
+@pytest.mark.parametrize("clear", [False, True])
+def test_full_vtcm_fill_uses_physical_order(kind, clear):
+    @T.prim_func
+    def kernel(S: T.Tensor((1,), "float16"), O: T.Tensor((2, R, C), "float16")):
+        with T.Kernel(1):
+            X = T.alloc_shared((2, R, C), "float16")
+            T.annotate_layout({X: KINDS[kind](X), O: KINDS[kind](O)})
+            if clear:
+                T.clear(X)
+            else:
+                T.fill(X, S[0])
+            T.copy(X, O)
+
+    assert "*(half64*)(X + " in _source(kernel)
+
+
+@pytest.mark.parametrize("case", ["partial", "direct", "alias"])
+def test_vtcm_fill_preserves_logical_regions_and_dependent_reads(case):
+    from tilelang.language import make_tensor
+
+    @T.prim_func
+    def kernel(O: T.Tensor((R, C), "float16")):
+        with T.Kernel(1):
+            X = T.alloc_shared((R, C), "float16")
+            T.annotate_layout({X: KINDS["activation"](X), O: KINDS["activation"](O)})
+            T.copy(O, X)
+            if case == "partial":
+                T.fill(X[1:R, 1:C], T.float16(1))
+            elif case == "alias":
+                Y = make_tensor(T.address_of(X[1, 0]), (1,), "float16")
+                T.fill(X, Y[0] + T.float16(1))
+            else:
+                T.fill(X, X[1, 0] + T.float16(1))
+            T.copy(X, O)
+
+    assert "*(half64*)(X + " not in _source(kernel)
+
+
 def _round_trip(kind, dtype, endpoint, region):
     """X[region] -> zeroed Crouton tiles -> Y, the whole tile matrix."""
     r0, r1, c0, c1 = REGIONS[region]
