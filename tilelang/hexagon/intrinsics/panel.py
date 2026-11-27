@@ -14,6 +14,9 @@ the first in its low nibble. Leading dimensions stack whole matrices.
 ``T.gemm`` with integer operands on HVX reads B, ``[N, K]`` with
 ``transpose_B``, in this layout. A parameter annotated with it arrives packed
 (``pack_panel``), and copies between two panel buffers move whole panels by DMA.
+For 64-column integer HMX, ``paired=True`` interleaves the two panels of
+each 64-row group at each 32-column K tile. The same flag selects the layout
+and its host byte order.
 """
 
 from __future__ import annotations
@@ -35,8 +38,8 @@ __all__ = ["PanelLayout", "make_hvx_panel_layout", "pack_panel", "unpack_panel"]
 class PanelLayout(Layout):
     """Panels over the last two dimensions of a buffer, ``lane`` columns per 32-bit lane."""
 
-    def __init__(self, shape, lane: int):
-        self.__init_handle_by_constructor__(tvm_ffi.get_global_func("tl.hexagon.PanelLayout"), list(shape), lane)
+    def __init__(self, shape, lane: int, paired: bool = False):
+        self.__init_handle_by_constructor__(tvm_ffi.get_global_func("tl.hexagon.PanelLayout"), list(shape), lane, paired)
 
 
 def _lane(dtype) -> int:
@@ -46,13 +49,15 @@ def _lane(dtype) -> int:
     return 32 // bits
 
 
-def make_hvx_panel_layout(buffer_or_shape, dtype=None) -> PanelLayout:
+def make_hvx_panel_layout(buffer_or_shape, dtype=None, *, paired: bool = False) -> PanelLayout:
     """The panel layout of a buffer, or of a shape of ``dtype`` elements."""
     shape = getattr(buffer_or_shape, "shape", buffer_or_shape)
     if not isinstance(shape, Sequence):
         raise TypeError("make_hvx_panel_layout expects a Buffer or a shape sequence")
     dtype = dtype if dtype is not None else buffer_or_shape.dtype
-    return PanelLayout(list(shape), _lane(dtype))
+    if paired and str(dtype) not in ("int8", "uint8"):
+        raise ValueError(f"paired panels require scalar 8-bit integers, got {dtype}")
+    return PanelLayout(list(shape), _lane(dtype), paired)
 
 
 def _panels(values: torch.Tensor, lane: int) -> torch.Tensor:
@@ -64,7 +69,12 @@ def _panels(values: torch.Tensor, lane: int) -> torch.Tensor:
     return v.transpose(-3, -2).contiguous()
 
 
-def pack_panel(values: torch.Tensor, bits: int) -> torch.Tensor:
+def _check_paired(rows, cols, bits):
+    if bits != 8 or rows <= 0 or cols <= 0 or rows % 64 or cols % 32:
+        raise ValueError("paired panels require 8-bit elements, rows in multiples of 64 and columns in multiples of 32")
+
+
+def pack_panel(values: torch.Tensor, bits: int, *, paired: bool = False) -> torch.Tensor:
     """The bytes of an integer matrix stored in the panel layout, as uint8.
 
     ``values`` [..., rows, cols] holds the integers (signed or unsigned); each
@@ -72,20 +82,28 @@ def pack_panel(values: torch.Tensor, bits: int) -> torch.Tensor:
     """
     if bits not in (4, 8):
         raise ValueError(f"pack_panel packs 4- or 8-bit integers, not {bits}-bit")
+    if paired:
+        *lead, rows, cols = values.shape
+        _check_paired(rows, cols, bits)
+        panels = _panels(values.to(torch.uint8), 4)
+        return panels.reshape(*lead, rows // 64, 2, cols // 32, 1024).transpose(-3, -2).reshape(-1)
     p = _panels(values.to(torch.int64) & ((1 << bits) - 1), 32 // bits).reshape(-1)
     if bits == 4:
         p = p[0::2] | (p[1::2] << 4)
     return p.to(torch.uint8)
 
 
-def unpack_panel(packed: torch.Tensor, shape: Sequence[int], bits: int, signed: bool) -> torch.Tensor:
+def unpack_panel(packed: torch.Tensor, shape: Sequence[int], bits: int, signed: bool, *, paired: bool = False) -> torch.Tensor:
     """The integer matrix [..., rows, cols] whose panel-layout bytes are ``packed``."""
+    *lead, rows, cols = shape
+    if paired:
+        _check_paired(rows, cols, bits)
+        packed = packed.reshape(*lead, rows // 64, cols // 32, 2, 1024).transpose(-3, -2)
     lane = 32 // bits
     v = packed.reshape(-1).to(torch.int64)
     if bits == 4:
         v = torch.stack([v & 0xF, v >> 4], dim=-1).reshape(-1)
     if signed:
         v = v - ((v >> (bits - 1)) << bits)
-    *lead, rows, cols = shape
     v = v.reshape(*lead, rows // ROWS, cols // lane, ROWS, lane).transpose(-3, -2)
     return v.reshape(*lead, rows, cols)

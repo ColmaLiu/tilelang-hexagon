@@ -49,8 +49,10 @@ Int8 runs 2.3x (32 columns) to 3.7x (64 columns) as fast as fp16 on v79, and
   **panel layout** that HVX's `vrmpy` already reads (`tilelang/hexagon/intrinsics/panel.py`):
   a panel's 32 rows of B are consecutive weight tiles along K.
 - **64 columns** (`weight.b:deep`): each K step reads 2048 bytes, the tiles of
-  two column groups one after the other. Their products go to two
-  accumulators, converted in turn.
+  two consecutive 32-row panels of B at the same K position. Their products
+  go to two accumulators. Convert bytes 0, 1, 2 and 3 with retain bits
+  1, 1, 1 and 0 for each accumulator in turn. The final conversion clears
+  the active accumulator and selects the other one.
 - **Output**: `cvt.ub` takes one byte of each accumulator, after adding a
   per-column bias and shifting by a per-column amount, both from a bias bank
   (`bias = mxmem2`, 256 bytes: 32 exponent words, then 32 int32 biases). v79
@@ -72,7 +74,7 @@ Int8 runs 2.3x (32 columns) to 3.7x (64 columns) as fast as fp16 on v79, and
 
 - A is `uint8` `[M, K]` in VTCM, in the 8-bit activation layout (an 8-bit
   `CroutonLayout`: 64 x 32 tiles, four rows a register);
-- B is `int8` `[N, K]` in VTCM, in the 8-bit panel layout;
+- B is `int8` `[N, K]` in VTCM, in ordinary or paired 8-bit panels;
 - C is `int32`, row-major, in VTCM;
 - M is a multiple of 64, and N and K of 32, and each region starts on a tile.
 
@@ -81,23 +83,36 @@ which a K below 2^31 / (255 * 128) = 65793 never reaches). It is the same
 result as the HVX path (`tl_hvx_gemm_int`); other integer GEMMs stay there,
 under its own rules (whole panels of B).
 
-A call (`tl_hexagon_hmx_gemm_int`, `hmx_gemm_int.h`) multiplies each 64 x 32
-output tile over its whole K in the accumulator, converts its four bytes into
-staging planes, and an HVX epilogue joins them into rows of C while HMX
-multiplies the next tile. In a worker pool each tile is a critical section, as
-for fp16.
+With whole 64-row pairs of B and whole 32-column K tiles, layout inference
+prefers paired panels for an unconstrained B. This lets HMX compute 64 output
+columns per weight load. An explicit ordinary panel layout keeps the
+32-column path, including when N is divisible by 64. An N of 32 modulo 64,
+or a region starting halfway through a pair, uses ordinary panels. A buffer
+annotated as paired must be used on whole pairs.
 
-`T.gemm` on the devices, operands in VTCM, cycles per 32 x 32 x 32 over 50
-calls (fp16 into an fp32 C, int8 into an int32 C):
+For DDR weights, annotate B with `make_hvx_panel_layout(B, paired=True)`
+and pass `pack_panel(weights, 8, paired=True)` at the call site. Use the
+default `paired=False` in both helpers for ordinary HMX or HVX panels.
+A copy from annotated DDR weights carries that layout into unannotated
+VTCM staging. DMA moves one or more complete pairs and can slice K on
+32-column boundaries. Pairing changes the byte order at each K step and
+preserves the number of bytes in the buffer.
+
+A call accumulates each 64 x 32 or 64 x 64 output tile over its whole K.
+It converts each 32-column half into four byte planes. Double buffering
+lets HVX join the previous tile's planes into rows of C while HMX multiplies
+the next tile. In a worker pool one tile occupies the HMX unit per turn,
+and HVX runs the epilogue after releasing it.
+
+The following device measurements used ordinary **32-column int8** weights.
+The figures are cycles per 32 x 32 x 32 over 50 `T.gemm` calls with operands
+in VTCM (fp16 into fp32 C, int8 into int32 C).
 
 | M x N x K | v79 fp16 | v79 int8 | v73 fp16 | v73 int8 |
 |---|---:|---:|---:|---:|
 | 128 x 256 x 2048 | 8.35 | 3.76 | 16.34 | 3.77 |
 | 256 x 256 x 2048 | 8.29 | 3.65 | 16.30 | 3.65 |
 | 128 x 256 x 8192 | 8.12 | 3.56 | 16.08 | 3.20 |
-
-The 64-column weight form (`weight.b:deep`) would take the int8 rate toward
-2.2; it needs B's panels paired per K tile, a layout of its own.
 
 Why A is unsigned: HMX has no signed activation. A signed A would need its
 buffer to hold `a ^ 0x80` instead of `a`, a value encoding that TileLang's

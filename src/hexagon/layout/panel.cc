@@ -20,9 +20,9 @@ int64_t StaticExtent(const PrimExpr &extent, const char *what) {
   return n->value;
 }
 
-// The physical position of every buffer index: [panel, column block, row in
-// the panel, column in the lane].
-Array<PrimExpr> PanelPosition(const Array<PrimExpr> &shape, int64_t lane) {
+// Map each logical element to its coordinates in ordinary or paired panels.
+Array<PrimExpr> PanelPosition(const Array<PrimExpr> &shape, int64_t lane,
+                              bool paired) {
   size_t n = shape.size();
   ICHECK_GE(n, 2) << "a panel layout needs at least two dimensions";
   ICHECK(lane == 4 || lane == 8)
@@ -39,14 +39,27 @@ Array<PrimExpr> PanelPosition(const Array<PrimExpr> &shape, int64_t lane) {
   PrimExpr r = InputPlaceholder(n - 2), c = InputPlaceholder(n - 1);
   PrimExpr p = make_const(DataType::Int(32), kPanelRows);
   PrimExpr l = make_const(DataType::Int(32), lane);
+  if (paired) {
+    ICHECK(lane == 4 && rows % 64 == 0 && cols % 32 == 0)
+        << "paired panels require 8-bit elements, rows in multiples of 64 "
+           "and columns in multiples of 32";
+    return {batch * static_cast<int>(rows / 64) + floordiv(r, 64),
+            floordiv(c, 32),
+            floormod(floordiv(r, 32), 2),
+            floordiv(floormod(c, 32), l),
+            floormod(r, p),
+            floormod(c, l)};
+  }
   return {batch * static_cast<int>(rows / kPanelRows) + floordiv(r, p),
           floordiv(c, l), floormod(r, p), floormod(c, l)};
 }
 
 } // namespace
 
-PanelLayoutNode::PanelLayoutNode(Array<PrimExpr> shape, int64_t lane)
-    : LayoutNode(shape, PanelPosition(shape, lane)), lane(lane) {}
+PanelLayoutNode::PanelLayoutNode(Array<PrimExpr> shape, int64_t lane,
+                                 bool paired)
+    : LayoutNode(shape, PanelPosition(shape, lane, paired)), lane(lane),
+      paired(paired) {}
 
 int64_t PanelLayoutNode::Rows() const {
   return InputShape()[InputDim() - 2].as<IntImmNode>()->value;
@@ -56,32 +69,35 @@ int64_t PanelLayoutNode::Cols() const {
   return InputShape()[InputDim() - 1].as<IntImmNode>()->value;
 }
 
-PanelLayout::PanelLayout(Array<PrimExpr> shape, int64_t lane) {
-  data_ = make_object<PanelLayoutNode>(shape, lane);
+PanelLayout::PanelLayout(Array<PrimExpr> shape, int64_t lane, bool paired) {
+  data_ = make_object<PanelLayoutNode>(shape, lane, paired);
 }
 
 void PanelLayoutNode::RestoreLegacyIndex() {
   // Earlier JSON stored the forward expression without its binding Vars.
   if (placeholder_vars_.empty()) {
-    InitForwardIndex(PanelPosition(input_size_, lane));
+    InitForwardIndex(PanelPosition(input_size_, lane, paired));
   }
 }
 
 void PanelLayoutNode::RegisterReflection() {
   namespace refl = reflection;
-  refl::ObjectDef<PanelLayoutNode>().def_ro(
-      "lane", &PanelLayoutNode::lane,
-      RestoreAfterSet<&PanelLayoutNode::lane,
-                      &PanelLayoutNode::RestoreLegacyIndex>());
+  refl::ObjectDef<PanelLayoutNode>()
+      .def_ro("paired", &PanelLayoutNode::paired, refl::default_value(false))
+      .def_ro("lane", &PanelLayoutNode::lane,
+              RestoreAfterSet<&PanelLayoutNode::lane,
+                              &PanelLayoutNode::RestoreLegacyIndex>());
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   PanelLayoutNode::RegisterReflection();
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.hexagon.PanelLayout",
-                        [](Array<PrimExpr> shape, int64_t lane) {
-                          return PanelLayout(shape, lane);
-                        });
+  refl::GlobalDef().def_packed("tl.hexagon.PanelLayout", [](PackedArgs args,
+                                                            Any *rv) {
+    ICHECK(args.size() == 2 || args.size() == 3);
+    *rv = PanelLayout(args[0].cast<Array<PrimExpr>>(), args[1].cast<int64_t>(),
+                      args.size() == 3 && args[2].cast<bool>());
+  });
 }
 
 } // namespace tl
