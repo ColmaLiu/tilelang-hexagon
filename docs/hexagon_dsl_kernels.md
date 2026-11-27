@@ -163,10 +163,12 @@ multiple of the narrowest dtype's register lanes). A clean fp16 map (x*x) went 2
 | `T.gemm` operands | Unit | Layout and selection |
 |---|---|---|
 | fp16 × fp16 → fp16 or fp32 | HMX | VTCM operands with tile-aligned origins. The compiler can pad partial tiles. |
-| uint8 × int8 → int32 | HMX | VTCM operands, `transpose_B=True`, A untransposed. M is a multiple of 64, N and K of 32. A and C start on 64×32 tiles, B on 32×32 tiles. |
+| uint8 × int8 → int32 | HMX | VTCM operands, `transpose_B=True`, A untransposed. M is a multiple of 64, N and K of 32. A and C start on 64×32 tiles, B on 32×32 tiles for ordinary panels or 64×32 tiles for paired panels (N a multiple of 64). |
 | Other supported float or integer GEMMs | HVX | Row-major operands, an fp16 weight-layout B, or an integer panel-layout B, as described below. |
 
-Integer HMX reads four interleaved rows per register of A and the same packed B panels as integer HVX.
+Integer HMX reads four interleaved rows per register of A. It infers paired B panels for whole
+64-column output groups. Explicit ordinary panels select 32 columns and also work on integer HVX.
+DDR weights use matching layout and host packing flags.
 It overwrites or adds to a row-major int32 C. The four byte-plane conversions preserve every bit
 of the product. [Integer HMX layouts and conversion](hexagon_hmx_int.md)
 

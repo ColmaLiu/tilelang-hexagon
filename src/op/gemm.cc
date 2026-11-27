@@ -59,6 +59,10 @@ void RegisterGemmImpl(GemmImpl impl) {
   ICHECK(impl.select_inst != nullptr);
   ICHECK(impl.compute_warp_partition != nullptr);
   ICHECK(impl.reuse_existing_shared_layout != nullptr);
+  if (!impl.is_shared_operand)
+    impl.is_shared_operand = [](const Buffer &buf) {
+      return IsSharedBuffer(buf);
+    };
   GemmImplRegistry().push_back(impl);
 }
 
@@ -247,13 +251,13 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &layout_args,
     // and must always set their layouts.
     auto block_size = *as_const_int(layout_args.thread_bounds->extent);
     String gemm_inst = GetGemmInstructionKey(block_size, layout_args.target);
+    const GemmImpl &impl = ResolveGemmImpl(layout_args.target);
     bool reuse_existing_shared_layout =
-        ResolveGemmImpl(layout_args.target)
-            .reuse_existing_shared_layout(gemm_inst);
+        impl.reuse_existing_shared_layout(gemm_inst);
     for (auto kv : inferred_layouts) {
       const Buffer &buf = kv.first;
       const Layout &layout = kv.second;
-      if (reuse_existing_shared_layout && IsSharedBuffer(buf) &&
+      if (reuse_existing_shared_layout && impl.is_shared_operand(buf) &&
           layout_args.layout_map.count(buf)) {
         continue;
       }

@@ -346,6 +346,7 @@ bool RegisterHexagonGemm() {
       hexagon::Gemm::SelectInst,
       hexagon::Gemm::ComputeWarpPartition,
       hexagon::Gemm::ReuseExistingSharedLayout,
+      hexagon::IsVTCMBuffer,
   });
   RegisterGemmBlockScaledImpl(GemmBlockScaledImpl{
       "hexagon.GemmBlockScaled",

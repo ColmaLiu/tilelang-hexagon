@@ -13,9 +13,12 @@
  * Within a lane the columns keep their order: two 4-bit elements share a
  * byte, the first in its low nibble. Leading dimensions stack whole matrices.
  *
- * The physical shape is [panels, column blocks, 32, lane], panels of all
- * matrices in order. Lowerings recognize the layout by its type. A parameter
- * in this layout arrives packed: the host stores it in the same order.
+ * Ordinary panels have shape [panels, column blocks, 32, lane]. Paired 8-bit
+ * panels for HMX have shape [pairs, cols/32, 2, 8, 32, 4]: each K tile
+ * contains the first panel's 1024 bytes followed by the second panel's.
+ * The leading physical axis spans all matrices. Lowerings recognize the layout
+ * by its type. A parameter in this layout arrives packed: the host stores it in
+ * the same order.
  */
 #ifndef TVM_TL_HEXAGON_LAYOUT_PANEL_H_
 #define TVM_TL_HEXAGON_LAYOUT_PANEL_H_
@@ -31,10 +34,16 @@ class PanelLayoutNode : public LayoutNode {
 public:
   // Default-constructible, so that reflection can rebuild one (serialization).
   PanelLayoutNode() = default;
-  PanelLayoutNode(ffi::Array<PrimExpr> shape, int64_t lane);
+  PanelLayoutNode(ffi::Array<PrimExpr> shape, int64_t lane,
+                  bool paired = false);
 
   // Columns per 32-bit lane: 32 / element bits.
   int64_t lane = 4;
+
+  // Deep byte weights interleave the 32-column K tiles of two panels.
+  bool paired = false;
+  int64_t GroupRows() const { return paired ? 2 * kPanelRows : kPanelRows; }
+  int64_t BlockCols() const { return paired ? 32 : lane; }
 
   // The matrix's rows and columns: the buffer's last two dimensions.
   int64_t Rows() const;
@@ -48,7 +57,8 @@ public:
 
 class PanelLayout : public Layout {
 public:
-  TVM_DLL PanelLayout(ffi::Array<PrimExpr> shape, int64_t lane);
+  TVM_DLL PanelLayout(ffi::Array<PrimExpr> shape, int64_t lane,
+                      bool paired = false);
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(PanelLayout, Layout,
                                              PanelLayoutNode);

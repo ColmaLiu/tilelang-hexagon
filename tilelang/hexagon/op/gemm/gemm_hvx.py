@@ -171,6 +171,8 @@ class GemmHVX(GemmBase):
             raise ValueError(
                 f"T.gemm({self.A.name}, {self.B.name}, {self.C.name}): HVX reads an integer B in the panel layout, but {self.B.name} has {layout}"
             )
+        if layout.paired:
+            raise ValueError(f"HVX reads {self.B.name} in unpaired panels; paired weights require 64-column integer HMX")
         others = [buffer.name for buffer in (self.A, self.C) if not _row_major(buffer, layout_map)]
         if others:
             raise ValueError(

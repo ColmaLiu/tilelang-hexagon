@@ -37,7 +37,7 @@ TL_HMX_INLINE void tl_hmx_int_bias(const HVX_Vector *config, int plane,
   asm volatile("bias = mxmem2(%0)" ::"r"(addr) : "memory");
 }
 
-template <bool Shared>
+template <bool Shared, bool Paired = false>
 TL_HMX_GEMM void
 tl_hexagon_hmx_gemm_int(int M, int N, int K, int32_t *c, int ldc,
                         const uint8_t *a, int a_row_tile_bytes, const int8_t *b,
@@ -63,47 +63,65 @@ tl_hexagon_hmx_gemm_int(int M, int N, int K, int32_t *c, int ldc,
     acquire();
 
   auto *planes = reinterpret_cast<HVX_Vector *>(stage);
+  constexpr int groups = Paired ? 2 : 1;
+  constexpr int width = groups * 32;
+  constexpr int weight_tile_bytes = width * 32;
   int slot = 0;
+  auto store_previous = [&]() {
+    for (int group = 0; group < groups; ++group)
+      tl_hmx_int_store(previous + group * 32, ldc,
+                       planes + ((slot ^ 1) * groups + group) * 64, clear);
+  };
   for (int mt = 0; mt < M / 64; ++mt) {
-    for (int nt = 0; nt < N / 32; ++nt, slot ^= 1) {
+    for (int nt = 0; nt < N / width; ++nt, slot ^= 1) {
       if constexpr (Shared)
         acquire();
       asm volatile("mxclracc" ::: "memory");
       for (int k = 0; k < K / 32; k += 32) {
         int n = K / 32 - k < 32 ? K / 32 - k : 32;
         const uint8_t *ap = a + mt * a_row_tile_bytes + k * 2048;
-        const int8_t *bp = b + nt * panel_bytes + k * 1024;
-        unsigned ar = n * 2048u - 1, wr = ((n * 1024u - 128) & ~127u) | 0x7f;
-        asm volatile("{ activation.ub = mxmem(%0, %1):deep\n"
-                     "  weight.b = mxmem(%2, %3) }" ::"r"(ap),
-                     "r"(ar), "r"(bp), "r"(wr)
-                     : "memory");
+        const int8_t *bp = b + nt * panel_bytes + k * weight_tile_bytes;
+        unsigned ar = n * 2048u - 1;
+        unsigned wr = ((n * weight_tile_bytes - 128u) & ~127u) | 0x7f;
+        if constexpr (Paired)
+          asm volatile("{ activation.ub = mxmem(%0, %1):deep\n"
+                       "  weight.b = mxmem(%2, %3):deep }" ::"r"(ap),
+                       "r"(ar), "r"(bp), "r"(wr)
+                       : "memory");
+        else
+          asm volatile("{ activation.ub = mxmem(%0, %1):deep\n"
+                       "  weight.b = mxmem(%2, %3) }" ::"r"(ap),
+                       "r"(ar), "r"(bp), "r"(wr)
+                       : "memory");
       }
       if constexpr (!Shared)
         if (previous)
-          tl_hmx_int_store(previous, ldc, planes + (slot ^ 1) * 64, clear);
-      for (int i = 0; i < 4; ++i) {
+          store_previous();
+      // Releasing the fourth byte clears this accumulator and selects the next.
+      for (int group = 0; group < groups; ++group) {
+        for (int i = 0; i < 4; ++i) {
 #if __HVX_ARCH__ >= 79
-        int bank = i;
+          int bank = i;
 #else
-        int bank = 0;
-        tl_hmx_int_bias(banks, i, bank);
+          int bank = 0;
+          tl_hmx_int_bias(banks, i, bank);
 #endif
-        int control = (1 << 15) | (bank << 12) | 2 | (i < 3);
-        auto *out = planes + slot * 64 + i * 16;
-        asm volatile("cvt.ub = acc(%0)\n mxmem(%1, %2) = cvt" ::"r"(control),
-                     "r"(out), "r"(0xf00)
-                     : "memory");
+          int control = (1 << 15) | (bank << 12) | 2 | (i < 3);
+          auto *out = planes + (slot * groups + group) * 64 + i * 16;
+          asm volatile("cvt.ub = acc(%0)\n mxmem(%1, %2) = cvt" ::"r"(control),
+                       "r"(out), "r"(0xf00)
+                       : "memory");
+        }
       }
       if constexpr (Shared) {
         tl_hmx_unit_release();
         if (previous)
-          tl_hmx_int_store(previous, ldc, planes + (slot ^ 1) * 64, clear);
+          store_previous();
       }
-      previous = c + mt * 64 * ldc + nt * 32;
+      previous = c + mt * 64 * ldc + nt * width;
     }
   }
   if constexpr (!Shared)
     tl_hmx_unit_release();
-  tl_hmx_int_store(previous, ldc, planes + (slot ^ 1) * 64, clear);
+  store_previous();
 }

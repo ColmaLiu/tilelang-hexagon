@@ -143,6 +143,17 @@ const PanelLayoutNode *PanelOf(const Buffer &buffer,
   return layout ? layout.value().as<PanelLayoutNode>() : nullptr;
 }
 
+LayoutMap InferPanelCopyLayout(const CopyNode &op, const LayoutInferArgs &T) {
+  const bool load = IsGlobalBuffer(op.src);
+  const Buffer &ddr = load ? op.src : op.dst;
+  const Buffer &vtcm = load ? op.dst : op.src;
+  if (IsGlobalBuffer(ddr) && IsVTCMBuffer(vtcm) && !T.layout_map.count(vtcm)) {
+    if (const auto *panel = PanelOf(ddr, T.layout_map))
+      return {{vtcm, PanelLayout(vtcm->shape, panel->lane, panel->paired)}};
+  }
+  return {};
+}
+
 namespace {
 
 // Why the copy between panel buffers `op` cannot move whole panels, or "":
@@ -156,6 +167,13 @@ std::string PanelRejection(const CopyNode &op, const LowerArgs &T,
     return "the copy from " + op.src->name + " to " + op.dst->name +
            " moves a panel layout, so both sides need it, for the same "
            "element width: the other side is packed once, ahead of the kernel";
+  if (src->paired != dst->paired)
+    return "a panel copy requires matching paired or unpaired layouts";
+  if (!op.src->dtype.is_scalar())
+    return "a panel copy requires scalar elements";
+  if (op.src->dtype.bits() * src->lane != 32)
+    return "a panel copy requires the panel lane width to match the element "
+           "dtype";
   const bool load = IsGlobalBuffer(op.src) && IsVTCMBuffer(op.dst);
   const bool store = IsVTCMBuffer(op.src) && IsGlobalBuffer(op.dst);
   if (!(load || store))
@@ -171,15 +189,15 @@ std::string PanelRejection(const CopyNode &op, const LowerArgs &T,
                               buffer->shape[i]))
         return "a panel copy needs provably in-bounds regions";
     }
-    PrimExpr rows = make_const(region[n - 2]->min.dtype(), kPanelRows);
-    PrimExpr lane = make_const(region[n - 1]->min.dtype(), src->lane);
+    PrimExpr rows = make_const(region[n - 2]->min.dtype(), src->GroupRows());
+    PrimExpr cols = make_const(region[n - 1]->min.dtype(), src->BlockCols());
     if (!analyzer->CanProveEqual(floormod(region[n - 2]->min, rows), 0) ||
         !analyzer->CanProveEqual(floormod(region[n - 2]->extent, rows), 0) ||
-        !analyzer->CanProveEqual(floormod(region[n - 1]->min, lane), 0) ||
-        !analyzer->CanProveEqual(floormod(region[n - 1]->extent, lane), 0))
-      return "a panel copy covers whole panels: rows on multiples of 32 and "
-             "columns on multiples of " +
-             std::to_string(src->lane);
+        !analyzer->CanProveEqual(floormod(region[n - 1]->min, cols), 0) ||
+        !analyzer->CanProveEqual(floormod(region[n - 1]->extent, cols), 0))
+      return "a panel copy covers whole panels: rows on multiples of " +
+             std::to_string(src->GroupRows()) +
+             " and columns on multiples of " + std::to_string(src->BlockCols());
   }
   size_t sn = op.src_range.size(), dn = op.dst_range.size();
   if (!analyzer->CanProveEqual(op.src_range[sn - 2]->extent,
@@ -192,9 +210,6 @@ std::string PanelRejection(const CopyNode &op, const LowerArgs &T,
   return "";
 }
 
-// A column block of a panel, 32 lanes of 32 bits, is one register.
-constexpr int64_t kPanelBlockBytes = 128;
-
 // The transfer of `op` between panel buffers: each panel of the region is a
 // row of its column blocks, panels a panel's bytes apart on each side.
 Stmt LowerPanelTransfer(const CopyNode &op, const LowerArgs &T,
@@ -202,18 +217,17 @@ Stmt LowerPanelTransfer(const CopyNode &op, const LowerArgs &T,
   const PanelLayoutNode *panel = PanelOf(op.src, T.layout_map);
   const bool load = IsGlobalBuffer(op.src);
   size_t sn = op.src_range.size(), dn = op.dst_range.size();
-  int64_t panels =
-      op.src_range[sn - 2]->extent.as<IntImmNode>()->value / kPanelRows;
-  int64_t row_bytes = op.src_range[sn - 1]->extent.as<IntImmNode>()->value /
-                      panel->lane * kPanelBlockBytes;
+  const int64_t rows = panel->GroupRows();
+  const int64_t bits = op.src->dtype.bits();
+  int64_t panels = op.src_range[sn - 2]->extent.as<IntImmNode>()->value / rows;
+  int64_t row_bytes =
+      op.src_range[sn - 1]->extent.as<IntImmNode>()->value * rows * bits / 8;
   auto stride = [&](const Buffer &buffer) {
-    return PanelOf(buffer, T.layout_map)->Cols() / panel->lane *
-           kPanelBlockBytes;
+    return PanelOf(buffer, T.layout_map)->Cols() * rows * bits / 8;
   };
   int64_t ss = stride(op.src), ds = stride(op.dst);
   ICHECK(row_bytes <= kField)
       << "a panel copy's panels must fit the 24-bit DMA descriptor's row size";
-  int64_t bits = op.src->dtype.bits();
   auto u32 = [](int64_t n) { return IntImm(DataType::UInt(32), n); };
   // A pointer at the region's logical start, `first` panels in: LowerTileOp
   // maps it through the layout to the panel's bytes.
@@ -221,10 +235,10 @@ Stmt LowerPanelTransfer(const CopyNode &op, const LowerArgs &T,
                 int64_t first, int64_t count, int64_t panel_stride) {
     Array<Range> start = region;
     size_t r = region.size() - 2;
-    start.Set(
-        r, Range::FromMinExtent(region[r]->min + IntImm(region[r]->min.dtype(),
-                                                        first * kPanelRows),
-                                region[r]->extent));
+    start.Set(r,
+              Range::FromMinExtent(
+                  region[r]->min + IntImm(region[r]->min.dtype(), first * rows),
+                  region[r]->extent));
     int64_t span = (count - 1) * panel_stride + row_bytes;
     return MakeAccessPtrAtRegion(buffer, start, GetBufferStrides(buffer), rw,
                                  IntImm(DataType::Int(32), span * 8 / bits));
@@ -651,8 +665,7 @@ LayoutMap HexagonDmaCopyNode::InferLayout(const LayoutInferArgs &layout_args,
                                           InferLevel level) const {
   (void)level;
   hexagon::CheckHexagonTarget(layout_args.target);
-  // DMA moves row-major bytes; it neither requires nor proposes a layout.
-  return {};
+  return hexagon::InferPanelCopyLayout(*this, layout_args);
 }
 
 Stmt HexagonDmaCopyNode::Lower(const LowerArgs &lower_args,

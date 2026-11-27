@@ -111,7 +111,7 @@ const HexagonBuiltin *FindHexagonBuiltin(const CallNode *call) {
       {tl::hexagon_hmx_gemm(), "tl_hexagon_hmx_gemm", "hmx_gemm.h", true, false,
        false, -1, 4},
       {tl::hexagon_hmx_gemm_int(), "tl_hexagon_hmx_gemm_int", "hmx_gemm_int.h",
-       true, false, false, -1, 1},
+       true, false, false, -1, 2},
       {tl::hexagon_hmx_gemm_blockscaled(), "tl_hexagon_hmx_gemm_blockscaled",
        "hmx_gemm.h", true, false, false, -1, 6},
       {tl::hexagon_hvx_gemm(), "tl_hvx_gemm", "hvx_gemm.h", false, false, false,
@@ -396,8 +396,8 @@ bool IsKnownNonDMAOperation(const CallNode *call) {
     booleans = 4;
     arity = 16;
   } else if (call->op.same_as(tl::hexagon_hmx_gemm_int())) {
-    booleans = 1;
-    arity = 13;
+    booleans = 2;
+    arity = 14;
   } else if (call->op.same_as(tl::hexagon_crouton_copy())) {
     booleans = 2;
     arity = 12;
@@ -412,7 +412,7 @@ bool IsKnownNonDMAOperation(const CallNode *call) {
     // would be emitted as raw expression text by the common C emitter.
     for (int i = booleans; i < arity; ++i) {
       const bool predicate =
-          ((arity == 16 && i == 13) || (arity == 13 && i == 10)) &&
+          ((arity == 16 && i == 13) || (arity == 14 && i == 11)) &&
           a[i].dtype().is_bool() && a[i].dtype().is_scalar();
       if (a[i].as<StringImmNode>() ||
           (!a[i].dtype().is_handle() && !IsIntegerScalar(a[i]) && !predicate))

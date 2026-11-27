@@ -21,6 +21,9 @@ namespace hexagon {
 const PanelLayoutNode *PanelOf(const tirx::Buffer &buffer,
                                const LayoutMap &layout_map);
 
+//! Carry a packed DDR endpoint's layout to its unannotated VTCM copy.
+LayoutMap InferPanelCopyLayout(const CopyNode &op, const LayoutInferArgs &T);
+
 /*!
  * \brief Why `op` cannot be one User-DMA transfer between DDR and VTCM, or
  * an empty string: equal byte-addressable dtypes, row-major buffers, and a

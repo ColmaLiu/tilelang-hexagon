@@ -261,10 +261,8 @@ std::optional<Stmt> LowerCroutonCopy(const CopyNode &op, const LowerArgs &T,
 struct Copy {
   static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
                                InferLevel level) {
-    (void)op;
-    (void)T;
     (void)level;
-    return {};
+    return InferPanelCopyLayout(op, T);
   }
 
   static Stmt Lower(const CopyNode &op, const LowerArgs &T,

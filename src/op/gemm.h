@@ -181,6 +181,8 @@ struct GemmImpl {
       Target target, String gemm_inst);
 
   bool (*reuse_existing_shared_layout)(String gemm_inst);
+  // Targets may also expose shared operands in backend-specific storage scopes.
+  bool (*is_shared_operand)(const Buffer &buffer) = nullptr;
 };
 
 void RegisterGemmImpl(GemmImpl impl);

@@ -290,8 +290,17 @@ class GemmHMXInt(GemmHMX):
         if _ROWS in self.gemm_node.annotations:
             raise ValueError("integer HMX does not support hexagon.rows")
 
+    def _whole_pairs(self):
+        analyzer = arith.Analyzer()
+        return (
+            self.N % 64 == 0
+            and analyzer.can_prove_equal(self.B.shape[-2] % 64, 0)
+            and analyzer.can_prove_equal(self.B.shape[-1] % 32, 0)
+            and analyzer.can_prove_equal(self.BRegion.region[-2].min % 64, 0)
+        )
+
     def infer_layout(self, target, thread_nums: int):
-        return {self.A: make_hmx_activation_layout(self.A), self.B: make_hvx_panel_layout(self.B)}
+        return {self.A: make_hmx_activation_layout(self.A), self.B: make_hvx_panel_layout(self.B, paired=self._whole_pairs())}
 
     def lower(self, layout_map, target, thread_bounds, thread_var, mbar_phase_expr=None):
         a_layout = layout_map.get(self.A, None)
@@ -300,30 +309,35 @@ class GemmHMXInt(GemmHMX):
         b_layout = layout_map.get(self.B, None)
         if not (isinstance(b_layout, PanelLayout) and b_layout.lane == 4):
             raise ValueError(f"integer HMX reads {self.B.name} in the 8-bit panel layout, got {b_layout}")
+        if b_layout.paired and not self._whole_pairs():
+            raise ValueError("paired integer HMX needs whole 64-row pairs of B starting on a pair boundary")
         strides = _strides(self.C, compact=self.C in layout_map)
         if not _row_major(self.C, layout_map) or not arith.Analyzer().can_prove_equal(strides[-1], 1):
             raise ValueError(f"integer HMX requires a row-major int32 C with contiguous columns, got {self.C.name}")
         M, N, K = self.M, self.N, self.K
         a_row_tile = 64 * self.A.shape[-1]
-        panel_bytes = TILE * self.B.shape[-1]
+        width = 64 if b_layout.paired else 32
+        panel_bytes = width * self.B.shape[-1]
+        stage_bytes = 2 * (width // 32) * 4 * 2048
         a = T.access_ptr(_first(self.ARegion), "r", (M // 64 - 1) * a_row_tile + 64 * K)
-        b = T.access_ptr(_first(self.BRegion), "r", (N // TILE - 1) * panel_bytes + TILE * K)
+        b = T.access_ptr(_first(self.BRegion), "r", (N // width - 1) * panel_bytes + width * K)
         ldc = strides[-2]
         clear = self.clear_accum
         mode = "w" if isinstance(clear, tirx.IntImm) and bool(clear.value) else "rw"
         c = T.access_ptr(_first(self.CRegion), mode, (M - 1) * ldc + N)
         gemm = tirx.op.Op.get("tl.hexagon_hmx_gemm_int")
-        shared = _flag(self._shared())
+        shared, paired = _flag(self._shared()), _flag(b_layout.paired)
 
         @T.prim_func
         def _gemm_hmx_int() -> None:
             config = T.alloc_shared((4 * CONFIG_WORDS,), "uint32", align=256)
-            stage = T.alloc_shared((2 * 4 * 2048,), "uint8", align=2048)
+            stage = T.alloc_shared((stage_bytes,), "uint8", align=2048)
             T.evaluate(
                 tirx.call_intrin(
                     "void",
                     gemm,
                     shared,
+                    paired,
                     M,
                     N,
                     K,
@@ -334,7 +348,7 @@ class GemmHMXInt(GemmHMX):
                     b,
                     panel_bytes,
                     T.Cast("bool", clear),
-                    T.access_ptr(stage[0], "rw", 2 * 4 * 2048),
+                    T.access_ptr(stage[0], "rw", stage_bytes),
                     T.access_ptr(config[0], "rw", 4 * CONFIG_WORDS),
                 )
             )
@@ -380,8 +394,9 @@ class GemmHMXBlockScaled(GemmBlockScaledMixin, GemmHMX):
         layout = layout_map.get(self.A, None)
         if not (isinstance(layout, CroutonLayout) and layout.bits == 16 and not layout.column_tiles and not layout.transposed):
             raise ValueError(f"{name} reads A in the HMX activation layout, but it has {layout}")
-        if not isinstance(layout_map.get(self.B, None), PanelLayout):
-            raise ValueError(f"{name} reads B in the panel layout, but it has {layout_map.get(self.B, None)}")
+        b_layout = layout_map.get(self.B, None)
+        if not isinstance(b_layout, PanelLayout) or b_layout.paired or b_layout.lane != 8:
+            raise ValueError(f"{name} reads B in the unpaired 4-bit panel layout, but it has {b_layout}")
         kind = self._c_kind(layout_map)
         if kind == "elements":
             raise ValueError(f"{name} writes C row-major or in Crouton tiles, not {layout_map.get(self.C, None)}")
