@@ -762,20 +762,176 @@ TL_DEVICE float tl_hvx_fabs(const half &x) { return __builtin_fabsf((float)x); }
 // codegen prints a / b as tl_hvx_div(a, b): a times the reciprocal of b. fp16
 // divides in fp32, so the quotient is rounded once.
 // ---------------------------------------------------------------------------
+#if __HVX_ARCH__ == 79
+// Keep the Newton products in qf32 until the reciprocal is rounded. This
+// shortens the common dependency chain before checking exceptional lanes.
+TL_DEVICE HVX_Vector tl_hvx_div_recip_vsf(HVX_Vector x) {
+  HVX_Vector seed = Q6_Vw_vsub_VwVw(Q6_V_vsplat_R(0x7ef127ea), x);
+  HVX_Vector neg_x = Q6_V_vxor_VV(x, Q6_V_vsplat_R((int)0x80000000));
+  HVX_Vector two = tl_hvx_splat_f(2.0f);
+  HVX_Vector neg_q = tl_hvx_qf(neg_x);
+  HVX_Vector y = Q6_Vqf32_vmpy_Vqf32Vqf32(
+      tl_hvx_qf(seed),
+      Q6_Vqf32_vadd_Vqf32Vsf(Q6_Vqf32_vmpy_VsfVsf(neg_x, seed), two));
+  for (int i = 0; i < 2; ++i)
+    y = Q6_Vqf32_vmpy_Vqf32Vqf32(
+        y, Q6_Vqf32_vadd_Vqf32Vsf(Q6_Vqf32_vmpy_Vqf32Vqf32(neg_q, y), two));
+  return Q6_Vsf_equals_Vqf32(y);
+}
+#endif
+
+// The integer seed needs a normal denominator whose inverse stays normal.
+// In the top two exponent bins the seed can cross zero.
+TL_DEVICE bool tl_hvx_div_needs_scalar(uint32_t bits) {
+  uint32_t magnitude = bits & 0x7fffffffU;
+  return (magnitude - 0x00800000U) >= (0x7e800000U - 0x00800000U);
+}
+
+TL_HEXAGON_IEEE_ARITHMETIC static inline HVX_Vector
+tl_hvx_div_approx(HVX_Vector x, HVX_Vector y) {
+#if __HVX_ARCH__ == 73 || __HVX_ARCH__ == 75
+  HVX_Vector seed = Q6_Vw_vsub_VwVw(Q6_V_vsplat_R(0x7ef127ea), y);
+  HVX_Vector two = tl_hvx_splat_f(2.0f);
+  // IEEE products keep the range of ordinary quotients, including subnormals.
+  for (int i = 0; i < 3; ++i)
+    seed = Q6_Vsf_vmpy_VsfVsf(
+        seed, Q6_Vsf_vsub_VsfVsf(two, Q6_Vsf_vmpy_VsfVsf(y, seed)));
+  return Q6_Vsf_vmpy_VsfVsf(x, seed);
+#elif __HVX_ARCH__ == 79
+  return tl_hvx_mul_sf(x, tl_hvx_div_recip_vsf(y));
+#else
+  return tl_hvx_mul_sf(x, tl_hvx_recip_vsf(y));
+#endif
+}
+
+TL_DEVICE HVX_VectorPred tl_hvx_div_exceptional(HVX_Vector x, HVX_Vector y) {
+  HVX_Vector magnitude = Q6_V_vsplat_R(0x7fffffff);
+  HVX_Vector by = Q6_V_vand_VV(y, magnitude);
+  HVX_Vector den_range = Q6_Vw_vsub_VwVw(by, Q6_V_vsplat_R(0x00800000));
+  HVX_VectorPred flags = Q6_Q_vcmp_gt_VuwVuw(
+      den_range, Q6_V_vsplat_R(0x7e800000 - 0x00800000 - 1));
+#if __HVX_ARCH__ == 73 || __HVX_ARCH__ == 75
+  // The IEEE reciprocal still rounds before the final multiply. Repair
+  // subnormal inputs and ratios that can round across underflow or overflow.
+  // For normal operands, one exponent bin in the encoding is a factor of two.
+  HVX_Vector ax = Q6_V_vand_VV(x, magnitude);
+  HVX_Vector delta =
+      Q6_Vw_vadd_VwVw(Q6_Vw_vsub_VwVw(ax, by), Q6_V_vsplat_R(0x3f000000));
+  HVX_VectorPred extreme =
+      Q6_Q_vcmp_gt_VuwVuw(delta, Q6_V_vsplat_R(0x7e7fffff));
+  HVX_VectorPred subnormal = Q6_Q_vcmp_gt_VuwVuw(Q6_V_vsplat_R(0x00800000), ax);
+  flags = Q6_Q_or_QQ(flags, Q6_Q_and_QQn(Q6_Q_or_QQ(extreme, subnormal),
+                                         Q6_Q_vcmp_eq_VwVw(ax, Q6_V_vzero())));
+#endif
+  return flags;
+}
+
+TL_DEVICE bool tl_hvx_div_has_exception(HVX_VectorPred flags) {
+  // The final word counts all active predicate bytes in the register.
+  return Q6_R_vextract_VR(Q6_Vw_prefixsum_Q(flags), 124) != 0;
+}
+
+TL_DEVICE HVX_Vector tl_hvx_div_repair(HVX_Vector x, HVX_Vector y, HVX_Vector q,
+                                       HVX_VectorPred flags) {
+  using Words = vec_type<uint32_t, 32>::nat_t;
+  using Floats = vec_type<float, 32>::nat_t;
+  Words exceptional = __builtin_bit_cast(Words, Q6_V_vand_QR(flags, -1));
+  Floats a = __builtin_bit_cast(Floats, x), b = __builtin_bit_cast(Floats, y);
+  Floats result = __builtin_bit_cast(Floats, q);
+  for (int i = 0; i < TL_HVX_F32_LANES; ++i)
+    if (exceptional[i])
+      result[i] = a[i] / b[i];
+  return __builtin_bit_cast(HVX_Vector, result);
+}
+
+template <int N>
+TL_DEVICE vec_type<float, N> tl_hvx_div(const vec_type<float, N> &a, float b) {
+  static_assert(N % TL_HVX_F32_LANES == 0, "tl_hvx_div needs whole registers");
+  // Preserve the vector reciprocal's rounding for ordinary broadcasts. Keep
+  // it outside the exceptional branch so loop-invariant denominators can hoist.
+  HVX_Vector reciprocal = tl_hvx_recip_vsf(tl_hvx_splat_f(b));
+  vec_type<float, N> out;
+#pragma clang loop unroll(full)
+  for (int i = 0; i < N / TL_HVX_F32_LANES; ++i) {
+    HVX_Vector x;
+    __builtin_memcpy(&x, (const char *)&a.v + 128 * i, 128);
+    HVX_Vector q = tl_hvx_mul_sf(x, reciprocal);
+#if __HVX_ARCH__ == 73 || __HVX_ARCH__ == 75
+    // Qfloat does not propagate non-finite numerators through the multiply.
+    // For a normal denominator, preserve infinity's sign and quiet NaNs.
+    HVX_Vector magnitude = Q6_V_vand_VV(x, Q6_V_vsplat_R(0x7fffffff));
+    HVX_VectorPred special =
+        Q6_Q_vcmp_gt_VuwVuw(magnitude, Q6_V_vsplat_R(0x7f7fffff));
+    HVX_VectorPred nan =
+        Q6_Q_vcmp_gt_VuwVuw(magnitude, Q6_V_vsplat_R(0x7f800000));
+    HVX_Vector sign =
+        Q6_V_vsplat_R(__builtin_bit_cast(uint32_t, b) & 0x80000000U);
+    HVX_Vector exact =
+        Q6_V_vor_VV(Q6_V_vxor_VV(x, sign), Q6_V_vand_QR(nan, 0x00400000));
+    q = Q6_V_vmux_QVV(special, exact, q);
+#endif
+    __builtin_memcpy((char *)&out.v + 128 * i, &q, 128);
+  }
+  using Floats = typename vec_type<float, N>::nat_t;
+  if (__builtin_expect(tl_hvx_div_needs_scalar(__builtin_bit_cast(uint32_t, b)),
+                       0))
+    return vec_type<float, N>(a.v / (Floats)b);
+  return out;
+}
+
 template <int N>
 TL_DEVICE vec_type<float, N> tl_hvx_div(const vec_type<float, N> &a,
                                         const vec_type<float, N> &b) {
   static_assert(N % TL_HVX_F32_LANES == 0, "tl_hvx_div needs whole registers");
-  vec_type<float, N> out;
+  constexpr int count = N / TL_HVX_F32_LANES;
+  // Clang rounds the storage size of a vector such as float96 up to a power
+  // of two. Only copy the registers that contain lanes.
+  HVX_Vector x[count], y[count], q[count];
+  __builtin_memcpy(x, &a.v, sizeof(x));
+  __builtin_memcpy(y, &b.v, sizeof(y));
+  HVX_VectorPred flags[count], combined{};
 #pragma clang loop unroll(full)
-  for (int i = 0; i < N / TL_HVX_F32_LANES; ++i) {
-    HVX_Vector x, y;
-    __builtin_memcpy(&x, (const char *)&a.v + 128 * i, 128);
-    __builtin_memcpy(&y, (const char *)&b.v + 128 * i, 128);
-    HVX_Vector q = tl_hvx_mul_sf(x, tl_hvx_recip_vsf(y));
-    __builtin_memcpy((char *)&out.v + 128 * i, &q, 128);
+  for (int i = 0; i < count; ++i) {
+    q[i] = tl_hvx_div_approx(x[i], y[i]);
+    flags[i] = tl_hvx_div_exceptional(x[i], y[i]);
+    combined = i == 0 ? flags[i] : Q6_Q_or_QQ(combined, flags[i]);
   }
+  // Independent reciprocals can overlap while a wide vector shares one
+  // branch. A sparse exception still repairs only its own register.
+  if (__builtin_expect(tl_hvx_div_has_exception(combined), 0)) {
+#pragma clang loop unroll(full)
+    for (int i = 0; i < count; ++i)
+      if (count == 1 || tl_hvx_div_has_exception(flags[i]))
+        q[i] = tl_hvx_div_repair(x[i], y[i], q[i], flags[i]);
+  }
+  vec_type<float, N> out;
+  __builtin_memcpy(&out.v, q, sizeof(q));
   return out;
+}
+
+// A forward overlap shorter than four registers needs the original 32-lane
+// store order. Exact aliases, backward overlaps and more distant dependences
+// are safe: each group finishes storing before the next group reads.
+TL_DEVICE bool tl_hvx_try_div_map(float *dst, const float *a, const float *b,
+                                  int registers) {
+  constexpr uintptr_t bytes = 4 * sizeof(HVX_Vector);
+  auto safe = [&](const float *src) {
+    uintptr_t distance =
+        reinterpret_cast<uintptr_t>(dst) - reinterpret_cast<uintptr_t>(src);
+    return distance == 0 || distance >= bytes;
+  };
+  if (registers < 4 || registers > INT32_MAX / 32 || registers % 4 ||
+      !safe(a) || !safe(b))
+    return false;
+  for (int i = 0; i < registers; i += 4) {
+    vec_type<float, 128> x, y;
+    // The runtime guarantees register alignment; float128 itself needs 512 B.
+    __builtin_memcpy(&x.v, __builtin_assume_aligned(a + i * 32, 128), bytes);
+    __builtin_memcpy(&y.v, __builtin_assume_aligned(b + i * 32, 128), bytes);
+    auto q = tl_hvx_div(x, y);
+    __builtin_memcpy(__builtin_assume_aligned(dst + i * 32, 128), &q.v, bytes);
+  }
+  return true;
 }
 
 template <int N>

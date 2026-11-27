@@ -200,6 +200,108 @@ def test_division_matches_torch(dtype, fast):
         kernel.adapter.close()
 
 
+def _fp32_division_rounding_boundaries(torch):
+    # Both generations preserve a finite result just below overflow and
+    # round the halfway case between zero and the smallest subnormal to zero.
+    for numerator, denominator in ((0x7A7C0FDA, 0x3A7C0FDB), (0x1F3CE3E9, 0x6A3CE3E9)):
+        x = torch.tensor(numerator, dtype=torch.int32).view(torch.float32)
+        a = torch.stack([x, -x]).repeat(16)
+        b = torch.tensor(denominator, dtype=torch.int32).view(torch.float32)
+        yield a, b, (a.double() / b.double()).float()
+
+
+def _check_fp32_division_boundary(torch, result, expected):
+    torch.testing.assert_close(result, expected, rtol=1e-6, atol=0)
+    assert torch.equal(result.signbit(), expected.signbit())
+
+
+def test_default_float32_division_at_exponent_limits():
+    import torch
+
+    @T.prim_func
+    def divide(a: T.Tensor((32,), "float32"), b: T.Tensor((32,), "float32"), out: T.Tensor((32,), "float32")):
+        with T.Kernel(1):
+            for i in T.Parallel(32):
+                out[i] = a[i] / b[i]
+
+    kernel = tilelang.compile(divide, out_idx=2, target="hexagon")
+    try:
+        # Cover every normal exponent and both signs, with normal and special
+        # denominators in the same register.
+        denom = torch.tensor([sign * 2.0**e for e in range(-126, 128) for sign in (1, -1)])
+        denom = torch.cat([denom, torch.tensor([torch.finfo(torch.float32).max, -(2.0**127), 2.0**-149, -(2.0**-149)])])
+        for b in denom.split(32):
+            torch.testing.assert_close(kernel(b.abs(), b), b.sign(), rtol=1e-6, atol=0)
+        a = torch.tensor([1.0, -1.0, 0.0, 1.0, 1.0, -1.0, 1.0, 3.0]).repeat(4)
+        b = torch.tensor([0.0, 0.0, -0.0, float("inf"), -float("inf"), 2.0**127, float("nan"), 2.0]).repeat(4)
+        result = kernel(a, b)
+        expected = a / b
+        torch.testing.assert_close(result, expected, equal_nan=True, rtol=1e-6, atol=0)
+        assert torch.equal(result[expected == 0].signbit(), expected[expected == 0].signbit())
+        # Keeping the Newton steps in qf32 changes this normal-denominator
+        # quotient on v73, where qf32 has different range and precision.
+        a = torch.tensor([0x005AE722], dtype=torch.int32).view(torch.float32).expand(32).contiguous()
+        b = torch.tensor([0x00EBC153], dtype=torch.int32).view(torch.float32).expand(32).contiguous()
+        torch.testing.assert_close(kernel(a, b), a / b, rtol=1e-6, atol=0)
+        for a, b, expected in _fp32_division_rounding_boundaries(torch):
+            _check_fp32_division_boundary(torch, kernel(a, b.expand_as(a).contiguous()), expected)
+        if kernel.adapter.dsp_arch in ("v73", "v75"):
+            # The IEEE multiply needs direct division on these lanes.
+            x = torch.tensor([0x77EC21D5, 0x331B2689], dtype=torch.int32).view(torch.float32)
+            y = torch.tensor([0x37EC21D6, 0x7E1B2689], dtype=torch.int32).view(torch.float32)
+            a = torch.cat([x, -x]).repeat(8)
+            b = y.repeat(16)
+            assert torch.equal(kernel(a, b).view(torch.int32), (a.double() / b.double()).float().view(torch.int32))
+    finally:
+        kernel.adapter.close()
+
+
+def test_wide_float32_division_repairs_each_register():
+    import torch
+
+    lanes = 128
+
+    @T.prim_func
+    def divide(a: T.Tensor((lanes,), "float32"), b: T.Tensor((lanes,), "float32"), out: T.Tensor((lanes,), "float32")):
+        with T.Kernel(1):
+            for i in T.Parallel(lanes):
+                out[i] = a[i] / b[i]
+
+    kernel = tilelang.compile(divide, out_idx=2, target="hexagon")
+    try:
+        for base in range(0, lanes, 32):
+            a = torch.full((lanes,), 6.5)
+            b = torch.full((lanes,), 3.25)
+            a[base], b[base] = 2.0**127, -(2.0**127)
+            a[base + 31], b[base + 31] = 2.0**-149, 2.0**-149
+            torch.testing.assert_close(kernel(a, b), a / b, rtol=1e-6, atol=0)
+    finally:
+        kernel.adapter.close()
+
+
+def test_float32_division_with_broadcast_denominator():
+    import torch
+
+    @T.prim_func
+    def divide(a: T.Tensor((32,), "float32"), out: T.Tensor((32,), "float32"), b: T.float32):
+        with T.Kernel(1):
+            for i in T.Parallel(32):
+                out[i] = a[i] / b
+
+    kernel = tilelang.compile(divide, out_idx=1, target="hexagon")
+    try:
+        x = torch.tensor([0.0, -0.0, 1.0, -1.0, 2.0**-149, -(2.0**127), float("inf"), float("nan")]).repeat(4)
+        for b in (3.25, -3.25, 2.0**-149, -(2.0**127), 0.0, -0.0, float("inf"), float("nan")):
+            expected = x / b
+            result = kernel(x, b)
+            torch.testing.assert_close(result, expected, rtol=1e-6, atol=0, equal_nan=True)
+            assert torch.equal(result[expected == 0].signbit(), expected[expected == 0].signbit())
+        for a, b, expected in _fp32_division_rounding_boundaries(torch):
+            _check_fp32_division_boundary(torch, kernel(a, b.item()), expected)
+    finally:
+        kernel.adapter.close()
+
+
 @pytest.mark.parametrize("dtype", ["float32", "float16", "int8"])
 def test_min_and_max_match_torch(dtype):
     import torch
