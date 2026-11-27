@@ -160,6 +160,16 @@ multiple of the narrowest dtype's register lanes). A clean fp16 map (x*x) went 2
 
 ## 2. GEMMs, and the pipelined K loop
 
+| `T.gemm` operands | Unit | Layout and selection |
+|---|---|---|
+| fp16 × fp16 → fp16 or fp32 | HMX | VTCM operands with tile-aligned origins. The compiler can pad partial tiles. |
+| uint8 × int8 → int32 | HMX | VTCM operands, `transpose_B=True`, A untransposed. M is a multiple of 64, N and K of 32. A and C start on 64×32 tiles, B on 32×32 tiles. |
+| Other supported float or integer GEMMs | HVX | Row-major operands, an fp16 weight-layout B, or an integer panel-layout B, as described below. |
+
+Integer HMX reads four interleaved rows per register of A and the same packed B panels as integer HVX.
+It overwrites or adds to a row-major int32 C. The four byte-plane conversions preserve every bit
+of the product. [Integer HMX layouts and conversion](hexagon_hmx_int.md)
+
 `T.gemm(A, B, C)` runs on HMX when A and B are fp16 and C is fp16 or fp32, all three in VTCM
 (shared buffers or fragments), and each operand is a matrix that starts on a 32x32 tile: a
 whole buffer, a sub-matrix of a larger one, or one matrix of a stack. Transposes and

@@ -2,17 +2,18 @@
  * \file tl/hexagon/layout/crouton.h
  * \brief Crouton: the VTCM layout of HMX operands, as a layout object.
  *
- * A Crouton tile is a 32x32 fp16 block stored as interleaved row pairs:
+ * An fp16 Crouton tile is a 32x32 block stored as interleaved row pairs:
  * element (r, c) of the tile sits at (r / 2) * 64 + c * 2 + r % 2, so one HVX
  * register holds one row pair. A matrix of tiles orders them by rows ([rt, ct],
  * HMX activations and outputs) or by columns ([ct, rt], HMX weights), and
- * leading dimensions stack whole matrices.
+ * leading dimensions stack whole matrices. An 8-bit tile holds 64x32
+ * elements, four rows interleaved per register, ordered by rows.
  *
  * The matrix is the buffer's last two dimensions, swapped when `transposed`
  * (a transposed GEMM operand keeps its storage shape). The physical shape is
- * [tiles, 16 row pairs, 64 lanes], tiles of all matrices in order, so that a
- * loop in physical order nests by tile and by register. Lowerings recognize
- * the layout by its type and read the tile order from it.
+ * [tiles, 16 registers, 1024 / bits lanes], tiles of all matrices in order, so
+ * that a loop in physical order nests by tile and by register. Lowerings
+ * recognize the layout by its type and read the tile order from it.
  */
 #ifndef TVM_TL_HEXAGON_LAYOUT_CROUTON_H_
 #define TVM_TL_HEXAGON_LAYOUT_CROUTON_H_
@@ -23,24 +24,28 @@ namespace tvm {
 namespace tl {
 
 constexpr int64_t kCroutonTile = 32;
-constexpr int64_t kCroutonTileElems = kCroutonTile * kCroutonTile;
 
 class CroutonLayoutNode : public LayoutNode {
 public:
   // Default-constructible, so that reflection can rebuild one (serialization).
   CroutonLayoutNode() = default;
   CroutonLayoutNode(ffi::Array<PrimExpr> shape, bool column_tiles,
-                    bool transposed);
+                    bool transposed, int bits = 16);
 
   // Tiles ordered by the matrix's columns (weights), else by its rows.
   bool column_tiles = false;
   // The matrix is the buffer's last two dimensions swapped.
   bool transposed = false;
+  int bits = 16;
 
   // The matrix's rows and columns, and its tiles along each.
   int64_t Rows() const;
   int64_t Cols() const;
-  int64_t RowTiles() const { return Rows() / kCroutonTile; }
+  int64_t TileRows() const { return 512 / bits; }
+  int64_t TileExtent(int axis) const {
+    return axis == RowAxis() ? TileRows() : kCroutonTile;
+  }
+  int64_t RowTiles() const { return Rows() / TileRows(); }
   int64_t ColTiles() const { return Cols() / kCroutonTile; }
   // The buffer axes of the matrix's rows and columns.
   int RowAxis() const;
@@ -55,7 +60,7 @@ public:
 class CroutonLayout : public Layout {
 public:
   TVM_DLL CroutonLayout(ffi::Array<PrimExpr> shape, bool column_tiles,
-                        bool transposed);
+                        bool transposed, int bits = 16);
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CroutonLayout, Layout,
                                              CroutonLayoutNode);

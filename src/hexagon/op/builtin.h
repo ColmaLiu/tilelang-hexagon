@@ -182,6 +182,10 @@ TVM_DLL const Op &hexagon_crouton_tile_store();
 // tiles without staging. The four flags print as template arguments.
 TVM_DLL const Op &hexagon_hmx_gemm();
 
+// tl_hexagon_hmx_gemm_int<shared>(M, N, K, c, ldc, a, a_row_tile_bytes, b,
+// panel_bytes, clear, stage, config): exact uint8 x int8 into row-major int32.
+TVM_DLL const Op &hexagon_hmx_gemm_int();
+
 // tl_hexagon_hmx_gemm_blockscaled<signed, rows, aligned, scaled, shared,
 // normal>(M, N, K, c, ldc, a, a_row_tile, b, panel_bytes, sfb, ld_sfb, gb, sfa,
 // ld_sfa, clear, w, stage, config) (hmx_gemm.h): C (+)= (A * SFA) (B * SFB)^T

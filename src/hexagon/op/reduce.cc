@@ -225,7 +225,8 @@ private:
     Optional<Layout> layout = layout_map_.Get(op_.src);
     const auto *crouton =
         layout ? layout.value().as<CroutonLayoutNode>() : nullptr;
-    if (!crouton || ndim_ != 2 || !RowMajor(op_.dst, layout_map_))
+    if (!crouton || crouton->bits != 16 || ndim_ != 2 ||
+        !RowMajor(op_.dst, layout_map_))
       return std::nullopt;
     arith::Analyzer analyzer;
     for (int d = 0; d < ndim_; ++d) {

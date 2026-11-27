@@ -31,6 +31,9 @@ constexpr const char *kRowMajorGemm = "hexagon.row_major_gemm";
  */
 std::string HMXRejection(const GemmNode &op, bool pad = false);
 
+// Why HMX cannot multiply uint8 activation tiles by int8 weight panels.
+std::string HMXIntRejection(const GemmNode &op);
+
 /*!
  * \brief The fewest rows of a GEMM off whole tiles that HMX runs. A GEMV
  * (M = 1) stays on HVX: padding its A and C to 32 rows would take 32 times

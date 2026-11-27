@@ -14,6 +14,9 @@ accumulates into. Each tile's epilogue runs while HMX multiplies the next one.
 A C of another layout takes the product from a row-major matrix of its own,
 element by element.
 
+A uint8 A and int8 B in the panel layout multiply into a row-major int32 C
+(:class:`GemmHMXInt`). Each 64x32 output tile leaves HMX as four byte planes.
+
 In a worker pool, whose workers share HMX (``LowerKernelLaunch`` marks such
 calls), each output tile is a critical section of its own instead, and its
 epilogue runs outside it, while another worker multiplies.
@@ -39,7 +42,7 @@ at a time, for HMX to multiply every row of A by.
 from __future__ import annotations
 
 import tvm_ffi
-from tvm import tirx
+from tvm import arith, tirx
 
 from tilelang.hexagon import language as T
 from tilelang.hexagon.intrinsics.crouton import (
@@ -57,6 +60,7 @@ from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScal
 from .gemm_hvx import _strides, group_major_sfb, scale_group
 
 GEMM_INST_HMX = "hexagon.hmx"
+GEMM_INST_HMX_INT = "hexagon.hmx.int"
 GEMM_INST_HMX_BLOCK_SCALED = "hexagon.hmx.blockscaled"
 
 # The worker count LowerKernelLaunch puts on the gemms of a worker pool.
@@ -125,6 +129,7 @@ class GemmHMX(GemmBase):
             layout = layout_map.get(buffer, None)
             if not (
                 isinstance(layout, CroutonLayout)
+                and layout.bits == 16
                 and bool(layout.column_tiles) == column_tiles
                 and bool(layout.transposed) == bool(transposed)
             ):
@@ -139,7 +144,13 @@ class GemmHMX(GemmBase):
         (row-major) or "elements" (through a row-major matrix)."""
 
         layout = layout_map.get(self.C, None)
-        if str(self.C.dtype) == "float16" and isinstance(layout, CroutonLayout) and not layout.column_tiles and not layout.transposed:
+        if (
+            str(self.C.dtype) == "float16"
+            and isinstance(layout, CroutonLayout)
+            and layout.bits == 16
+            and not layout.column_tiles
+            and not layout.transposed
+        ):
             return "crouton"
         if _row_major(self.C, layout_map):
             return "rows"
@@ -269,6 +280,68 @@ class GemmHMX(GemmBase):
         return _gemm_hmx_elements
 
 
+class GemmHMXInt(GemmHMX):
+    """An exact uint8 by int8 product from activation tiles and weight panels."""
+
+    def __post_init__(self) -> None:
+        # HMX's two integer ports have different signedness.
+        if (str(self.A.dtype), str(self.B.dtype), str(self.C.dtype)) != ("uint8", "int8", "int32"):
+            raise ValueError("integer HMX requires uint8 A, int8 B and int32 C")
+        if _ROWS in self.gemm_node.annotations:
+            raise ValueError("integer HMX does not support hexagon.rows")
+
+    def infer_layout(self, target, thread_nums: int):
+        return {self.A: make_hmx_activation_layout(self.A), self.B: make_hvx_panel_layout(self.B)}
+
+    def lower(self, layout_map, target, thread_bounds, thread_var, mbar_phase_expr=None):
+        a_layout = layout_map.get(self.A, None)
+        if not (isinstance(a_layout, CroutonLayout) and a_layout.bits == 8 and not a_layout.column_tiles and not a_layout.transposed):
+            raise ValueError(f"integer HMX reads {self.A.name} in the 8-bit activation layout, got {a_layout}")
+        b_layout = layout_map.get(self.B, None)
+        if not (isinstance(b_layout, PanelLayout) and b_layout.lane == 4):
+            raise ValueError(f"integer HMX reads {self.B.name} in the 8-bit panel layout, got {b_layout}")
+        strides = _strides(self.C, compact=self.C in layout_map)
+        if not _row_major(self.C, layout_map) or not arith.Analyzer().can_prove_equal(strides[-1], 1):
+            raise ValueError(f"integer HMX requires a row-major int32 C with contiguous columns, got {self.C.name}")
+        M, N, K = self.M, self.N, self.K
+        a_row_tile = 64 * self.A.shape[-1]
+        panel_bytes = TILE * self.B.shape[-1]
+        a = T.access_ptr(_first(self.ARegion), "r", (M // 64 - 1) * a_row_tile + 64 * K)
+        b = T.access_ptr(_first(self.BRegion), "r", (N // TILE - 1) * panel_bytes + TILE * K)
+        ldc = strides[-2]
+        clear = self.clear_accum
+        mode = "w" if isinstance(clear, tirx.IntImm) and bool(clear.value) else "rw"
+        c = T.access_ptr(_first(self.CRegion), mode, (M - 1) * ldc + N)
+        gemm = tirx.op.Op.get("tl.hexagon_hmx_gemm_int")
+        shared = _flag(self._shared())
+
+        @T.prim_func
+        def _gemm_hmx_int() -> None:
+            config = T.alloc_shared((4 * CONFIG_WORDS,), "uint32", align=256)
+            stage = T.alloc_shared((2 * 4 * 2048,), "uint8", align=2048)
+            T.evaluate(
+                tirx.call_intrin(
+                    "void",
+                    gemm,
+                    shared,
+                    M,
+                    N,
+                    K,
+                    c,
+                    ldc,
+                    a,
+                    a_row_tile,
+                    b,
+                    panel_bytes,
+                    T.Cast("bool", clear),
+                    T.access_ptr(stage[0], "rw", 2 * 4 * 2048),
+                    T.access_ptr(config[0], "rw", 4 * CONFIG_WORDS),
+                )
+            )
+
+        return _gemm_hmx_int
+
+
 class GemmHMXBlockScaled(GemmBlockScaledMixin, GemmHMX):
     """``T.gemm_blockscaled`` of an fp16 A on HMX: ``C (+)= (A * SFA) @ (B *
     SFB)^T`` for a 4-bit B in the panel layout, its rows along K
@@ -305,7 +378,7 @@ class GemmHMXBlockScaled(GemmBlockScaledMixin, GemmHMX):
         if self.trans_A:
             raise ValueError(f"{name} reads A as [M, K], not transposed")
         layout = layout_map.get(self.A, None)
-        if not (isinstance(layout, CroutonLayout) and not layout.column_tiles and not layout.transposed):
+        if not (isinstance(layout, CroutonLayout) and layout.bits == 16 and not layout.column_tiles and not layout.transposed):
             raise ValueError(f"{name} reads A in the HMX activation layout, but it has {layout}")
         if not isinstance(layout_map.get(self.B, None), PanelLayout):
             raise ValueError(f"{name} reads B in the panel layout, but it has {layout_map.get(self.B, None)}")
