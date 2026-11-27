@@ -339,6 +339,62 @@ TL_DEVICE void tl_crouton_copy(half *crouton, int row_tiles, int col_tiles,
                                               c0, 0, rows, cols, m, rs, cs);
 }
 
+// Four byte rows per register. Split each row at tile boundaries so the
+// masked stores also preserve columns outside a copied region.
+template <bool Pack, bool ColumnTiles, typename Byte,
+          std::enable_if_t<sizeof(Byte) == 1, int> = 0>
+TL_DEVICE void tl_crouton_copy(Byte *tiles, int, int col_tiles, int r0, int c0,
+                               int rows, int cols, Byte *m, int rs, int cs) {
+  static_assert(!ColumnTiles, "8-bit Crouton tiles are ordered by rows");
+  for (int i = 0; i < rows;) {
+    int r = r0 + i;
+    bool four = cs == 1 && !(r & 3) && rows - i >= 4;
+    for (int j = 0; j < cols;) {
+      int c = c0 + j;
+      int n = 32 - (c & 31);
+      if (n > cols - j)
+        n = cols - j;
+      Byte *group =
+          tiles + ((r / 64) * col_tiles + c / 32) * 2048 + ((r & 63) / 4) * 128;
+      Byte *p = group + (c & 31) * 4;
+      Byte *row = m + i * rs + j * cs;
+      if (!four) {
+        for (int k = 0; k < n; ++k) {
+          if constexpr (Pack)
+            p[k * 4 + (r & 3)] = row[k * cs];
+          else
+            row[k * cs] = p[k * 4 + (r & 3)];
+        }
+      } else if constexpr (Pack) {
+        HVX_Vector v01 = Q6_V_lo_W(Q6_W_vshuff_VVR(
+            tl_hvx_load_bytes(row + rs, n), tl_hvx_load_bytes(row, n), -1));
+        HVX_Vector v23 =
+            Q6_V_lo_W(Q6_W_vshuff_VVR(tl_hvx_load_bytes(row + 3 * rs, n),
+                                      tl_hvx_load_bytes(row + 2 * rs, n), -1));
+        HVX_Vector v = Q6_V_lo_W(Q6_W_vshuff_VVR(v23, v01, -2));
+        if (n == 32)
+          *reinterpret_cast<HVX_Vector *>(group) = v;
+        else
+          tl_hvx_store_bytes(p, v, 4 * n);
+      } else {
+        HVX_Vector v = Q6_V_vror_VR(
+            *reinterpret_cast<const HVX_Vector *>(group), (c & 31) * 4);
+        HVX_VectorPair pairs = Q6_W_vdeal_VVR(v, v, -2);
+        HVX_VectorPair r01 =
+            Q6_W_vdeal_VVR(Q6_V_lo_W(pairs), Q6_V_lo_W(pairs), -1);
+        HVX_VectorPair r23 =
+            Q6_W_vdeal_VVR(Q6_V_hi_W(pairs), Q6_V_hi_W(pairs), -1);
+        tl_hvx_store_bytes(row, Q6_V_lo_W(r01), n);
+        tl_hvx_store_bytes(row + rs, Q6_V_hi_W(r01), n);
+        tl_hvx_store_bytes(row + 2 * rs, Q6_V_lo_W(r23), n);
+        tl_hvx_store_bytes(row + 3 * rs, Q6_V_hi_W(r23), n);
+      }
+      j += n;
+    }
+    i += four ? 4 : 1;
+  }
+}
+
 // Copies the region [sr0, sr0 + rows) x [sc0, sc0 + cols) of the Crouton
 // matrix src to dst from (dr0, dc0): matrices of the same tile order, and a
 // region of whole tiles in both, which move a register at a time.

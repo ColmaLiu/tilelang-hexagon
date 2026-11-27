@@ -93,10 +93,13 @@ bool UseRowMajorGemm(const GemmNode &op, const Map<Var, Layout> &annotated) {
   }
   if (!hexagon::RowMajor(op.a_, layouts) || !hexagon::RowMajor(op.c_, layouts))
     return false;
+  if (op.a_->dtype == DataType::UInt(8))
+    return layouts.count(op.a_) ||
+           (layouts.count(op.b_) && hexagon::RowMajor(op.b_, layouts));
   if (hexagon::RowMajor(op.b_, layouts))
     return true;
   const auto *weight = layouts.at(op.b_).as<CroutonLayoutNode>();
-  return layouts.count(op.a_) && !op.transA_ && weight &&
+  return layouts.count(op.a_) && !op.transA_ && weight && weight->bits == 16 &&
          weight->column_tiles && weight->transposed == op.transB_ &&
          op.n_ % kCroutonTile == 0 && op.k_ % kCroutonTile == 0;
 }
@@ -144,7 +147,9 @@ std::unordered_map<const BufferNode *, Buffer> PaddedOperands(
       return;
     TileOperator op = ParseOperator(GetRef<Call>(call));
     const auto *gemm = op.defined() ? op.as<GemmNode>() : nullptr;
-    if (gemm != nullptr && hexagon::HMXRejection(*gemm, /*pad=*/true).empty())
+    if (gemm != nullptr &&
+        (hexagon::HMXRejection(*gemm, /*pad=*/true).empty() ||
+         hexagon::HMXIntRejection(*gemm).empty()))
       gemms.emplace_back(call, GetRef<Gemm>(gemm));
   });
   std::unordered_map<const BufferNode *, Buffer> padded;
@@ -167,7 +172,8 @@ std::unordered_map<const BufferNode *, Buffer> PaddedOperands(
       annotations->emplace(call, hexagon::kRowMajorGemm);
       continue;
     }
-    if (!own(gemm->a_) || !own(gemm->b_))
+    if (gemm->a_->dtype != DataType::Float(16) || !own(gemm->a_) ||
+        !own(gemm->b_))
       continue;
     for (const Buffer &buffer : {gemm->a_, gemm->b_}) {
       if (!whole(buffer))

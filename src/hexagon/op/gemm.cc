@@ -36,13 +36,15 @@ namespace hexagon {
 namespace {
 constexpr const char *kHexagonScalar = "cpu.scalar";
 constexpr const char *kHexagonHMX = "hexagon.hmx";
+constexpr const char *kHexagonHMXInt = "hexagon.hmx.int";
 constexpr const char *kHexagonHVX = "hexagon.hvx";
 constexpr const char *kHexagonHVXBlockScaled = "hexagon.hvx.blockscaled";
 constexpr const char *kHexagonHMXBlockScaled = "hexagon.hmx.blockscaled";
 constexpr int kTile = 32;
 
-bool OnTiles(const PrimExpr &value, arith::Analyzer *analyzer) {
-  return analyzer->CanProveEqual(floormod(value, kTile), 0);
+bool OnTiles(const PrimExpr &value, arith::Analyzer *analyzer,
+             int tile = kTile) {
+  return analyzer->CanProveEqual(floormod(value, tile), 0);
 }
 
 std::string TypeName(DataType dtype) {
@@ -95,6 +97,54 @@ std::string HMXRejection(const GemmNode &op, bool pad) {
         continue;
       if (!OnTiles(buffer->shape[i], &analyzer))
         return operand + " is not whole 32 x 32 tiles";
+    }
+  }
+  return "";
+}
+
+std::string HMXIntRejection(const GemmNode &op) {
+  if (op.annotations_.count(kRowMajorGemm))
+    return "an operand has an explicit row-major layout";
+  if (op.a_->dtype != DataType::UInt(8) || op.b_->dtype != DataType::Int(8) ||
+      op.c_->dtype != DataType::Int(32))
+    return "integer HMX needs uint8 A x int8 B into int32 C, got " +
+           TypeName(op.a_->dtype) + " x " + TypeName(op.b_->dtype) + " into " +
+           TypeName(op.c_->dtype);
+  if (op.transA_ || !op.transB_)
+    return "integer HMX needs transpose_B and a non-transposed A";
+  if (op.m_ <= 0 || op.m_ % 64 || op.n_ <= 0 || op.n_ % 32 || op.k_ <= 0 ||
+      op.k_ % 32)
+    return "integer HMX needs positive M in multiples of 64 and N and K in "
+           "multiples of 32, got " +
+           std::to_string(op.m_) + " x " + std::to_string(op.n_) + " x " +
+           std::to_string(op.k_);
+  arith::Analyzer analyzer;
+  for (const auto &[name, region] :
+       {std::pair{"A", op.aRegion_}, std::pair{"B", op.bRegion_},
+        std::pair{"C", op.cRegion_}}) {
+    const Buffer &buf = region->buffer;
+    std::string operand = std::string(name) + " (" + buf->name + ")";
+    if (!IsVTCMBuffer(buf))
+      return operand + " is not in VTCM";
+    const auto &ranges = region->region;
+    size_t rank = ranges.size();
+    if (rank < 2)
+      return operand + " is not a matrix";
+    for (size_t i = 0; i + 2 < rank; ++i)
+      if (!is_one(ranges[i]->extent))
+        return operand + " spans more than one matrix";
+    int tile_rows = region.same_as(op.bRegion_) ? 32 : 64;
+    if (!OnTiles(ranges[rank - 2]->min, &analyzer, tile_rows) ||
+        !OnTiles(ranges[rank - 1]->min, &analyzer))
+      return operand + "'s region does not start on a " +
+             std::to_string(tile_rows) + " x 32 tile";
+    if (!region.same_as(op.cRegion_)) {
+      // A is tiled along K. The panel layout packs B in groups of four bytes.
+      int cols = region.same_as(op.bRegion_) ? 4 : 32;
+      if (!OnTiles(buf->shape[rank - 2], &analyzer, tile_rows) ||
+          !OnTiles(buf->shape[rank - 1], &analyzer, cols))
+        return operand + " cannot hold whole " + std::to_string(tile_rows) +
+               " x " + std::to_string(cols) + " layout blocks";
     }
   }
   return "";
@@ -240,6 +290,8 @@ struct Gemm {
     (void)target;
     if (HMXRejection(op).empty())
       return String(kHexagonHMX);
+    if (HMXIntRejection(op).empty())
+      return String(kHexagonHMXInt);
     return HVXRejection(op).empty() ? String(kHexagonHVX)
                                     : String(kHexagonScalar);
   }
@@ -317,6 +369,12 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              const auto *node = gemm.as<GemmNode>();
              ICHECK(node) << "expected a tl.Gemm, got " << gemm->GetTypeKey();
              return String(hexagon::HMXRejection(*node));
+           })
+      .def("tl.hexagon.GemmHMXIntRejection",
+           [](ObjectRef gemm) {
+             const auto *node = gemm.as<GemmNode>();
+             ICHECK(node) << "expected a tl.Gemm, got " << gemm->GetTypeKey();
+             return String(hexagon::HMXIntRejection(*node));
            })
       .def("tl.hexagon.GemmHVXRejection", [](ObjectRef gemm) {
         const auto *node = gemm.as<GemmNode>();

@@ -113,6 +113,9 @@ private:
   bool in_cooperative_ = false;
   /*! \brief whether the emitter is inside a worker loop body */
   bool in_worker_ = false;
+  // An fp16 GEMM or external code can replace the integer conversion banks
+  // between tiles while workers take turns at HMX.
+  bool worker_changes_int_bias_ = false;
   /*! \brief the program index of the worker loop being emitted */
   ffi::Optional<tirx::Var> worker_program_;
   // Print a T.Kernel(num_workers=) grid loop as a tl_parallel_for call whose

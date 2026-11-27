@@ -276,7 +276,8 @@ std::string CroutonRejection(const CopyNode &op, const LowerArgs &T,
   const CroutonLayoutNode *src = CroutonOf(op.src, T.layout_map);
   const CroutonLayoutNode *dst = CroutonOf(op.dst, T.layout_map);
   if (!src || !dst || src->column_tiles != dst->column_tiles ||
-      src->transposed != dst->transposed || op.src->dtype != op.dst->dtype)
+      src->transposed != dst->transposed || src->bits != dst->bits ||
+      op.src->dtype != op.dst->dtype)
     return "the copy from " + op.src->name + " to " + op.dst->name +
            " moves Crouton tiles, so both sides need the same Crouton layout "
            "(tile order and transpose) and dtype";
@@ -295,11 +296,14 @@ std::string CroutonRejection(const CopyNode &op, const LowerArgs &T,
                               buffer->shape[i]))
         return "a Crouton copy needs provably in-bounds regions";
       if (i + 2 >= n) {
-        PrimExpr tile = make_const(region[i]->min.dtype(), kCroutonTile);
+        const auto *layout = CroutonOf(buffer, T.layout_map);
+        PrimExpr tile =
+            make_const(region[i]->min.dtype(), layout->TileExtent(i));
         if (!analyzer->CanProveEqual(floormod(region[i]->min, tile), 0) ||
             !analyzer->CanProveEqual(floormod(region[i]->extent, tile), 0))
           return "a Crouton copy covers whole tiles: rows and columns on "
-                 "multiples of 32";
+                 "multiples of " +
+                 std::to_string(layout->TileRows()) + " and 32";
       }
     }
   }
@@ -332,10 +336,11 @@ Stmt LowerCroutonTransfer(const CopyNode &op, const LowerArgs &T,
   auto extent = [](const Array<Range> &region, int axis) {
     return region[axis]->extent.as<IntImmNode>()->value;
   };
-  int64_t tile_bytes = kCroutonTileElems * op.src->dtype.bytes();
-  int64_t runs = extent(op.src_range, across_axis(src)) / kCroutonTile;
-  int64_t run_bytes =
-      extent(op.src_range, run_axis(src)) / kCroutonTile * tile_bytes;
+  int64_t tile_bytes = src->TileRows() * kCroutonTile * op.src->dtype.bytes();
+  int64_t runs = extent(op.src_range, across_axis(src)) /
+                 src->TileExtent(across_axis(src));
+  int64_t run_bytes = extent(op.src_range, run_axis(src)) /
+                      src->TileExtent(run_axis(src)) * tile_bytes;
   auto stride = [&](const CroutonLayoutNode *layout) {
     return (layout->column_tiles ? layout->RowTiles() : layout->ColTiles()) *
            tile_bytes;
@@ -353,10 +358,11 @@ Stmt LowerCroutonTransfer(const CopyNode &op, const LowerArgs &T,
                 int64_t count, int64_t run_stride) {
     Array<Range> start = region;
     int axis = across_axis(layout);
-    start.Set(axis, Range::FromMinExtent(region[axis]->min +
-                                             IntImm(region[axis]->min.dtype(),
-                                                    first * kCroutonTile),
-                                         region[axis]->extent));
+    start.Set(axis,
+              Range::FromMinExtent(region[axis]->min +
+                                       IntImm(region[axis]->min.dtype(),
+                                              first * layout->TileExtent(axis)),
+                                   region[axis]->extent));
     int64_t span = (count - 1) * run_stride + run_bytes;
     return MakeAccessPtrAtRegion(buffer, start, GetBufferStrides(buffer), rw,
                                  IntImm(DataType::Int(32), span / bytes));
@@ -561,7 +567,7 @@ Stmt LowerCacheWriteback(const Buffer &buffer, const Array<Range> &region,
         layout->column_tiles ? layout->ColAxis() : layout->RowAxis();
     // The tiles the region touches along an axis, [first, end).
     auto tile = [&](int axis) {
-      return make_const(region[axis]->min.dtype(), kCroutonTile);
+      return make_const(region[axis]->min.dtype(), layout->TileExtent(axis));
     };
     auto first = [&](int axis) {
       return floordiv(region[axis]->min, tile(axis));
@@ -570,7 +576,7 @@ Stmt LowerCacheWriteback(const Buffer &buffer, const Array<Range> &region,
       return floordiv(region[axis]->min + region[axis]->extent + tile(axis) - 1,
                       tile(axis));
     };
-    int64_t tile_bytes = kCroutonTileElems * bytes;
+    int64_t tile_bytes = layout->TileRows() * kCroutonTile * bytes;
     int64_t stride =
         (layout->column_tiles ? layout->RowTiles() : layout->ColTiles()) *
         tile_bytes;

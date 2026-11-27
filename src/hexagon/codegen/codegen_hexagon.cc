@@ -110,6 +110,8 @@ const HexagonBuiltin *FindHexagonBuiltin(const CallNode *call) {
        false, false, false, -1, 4},
       {tl::hexagon_hmx_gemm(), "tl_hexagon_hmx_gemm", "hmx_gemm.h", true, false,
        false, -1, 4},
+      {tl::hexagon_hmx_gemm_int(), "tl_hexagon_hmx_gemm_int", "hmx_gemm_int.h",
+       true, false, false, -1, 1},
       {tl::hexagon_hmx_gemm_blockscaled(), "tl_hexagon_hmx_gemm_blockscaled",
        "hmx_gemm.h", true, false, false, -1, 6},
       {tl::hexagon_hvx_gemm(), "tl_hvx_gemm", "hvx_gemm.h", false, false, false,
@@ -235,6 +237,7 @@ private:
         tl::hexagon_crouton_move_tiles(),
         tl::hexagon_crouton_tile_store(),
         tl::hexagon_hmx_gemm(),
+        tl::hexagon_hmx_gemm_int(),
         tl::hexagon_hmx_gemm_blockscaled(),
         tl::sync_grid()};
     for (const auto &safe : without_arithmetic) {
@@ -289,11 +292,19 @@ int64_t VtcmArenaBytes(const Stmt &body) {
   return bytes;
 }
 
-bool UsesHMX(const Stmt &body) {
+bool UsesHMX(const Stmt &body, bool *other_bias) {
   bool found = false;
-  tirx::PostOrderVisit(body, [&found](const ffi::ObjectRef &node) {
-    if (const auto *call = node.as<CallNode>())
-      found |= IsHexagonHMXIntrinsic(call);
+  tirx::PostOrderVisit(body, [&](const ffi::ObjectRef &node) {
+    if (const auto *attr = node.as<AttrStmtNode>())
+      *other_bias |= attr->attr_key == tirx::attr::pragma_import_c;
+    if (const auto *call = node.as<CallNode>()) {
+      bool hmx = IsHexagonHMXIntrinsic(call);
+      found |= hmx;
+      *other_bias |= (hmx && !call->op.same_as(tl::hexagon_hmx_gemm_int())) ||
+                     call->op.same_as(builtin::call_extern()) ||
+                     call->op.same_as(builtin::call_pure_extern()) ||
+                     !call->op.as<OpNode>();
+    }
   });
   return found;
 }
@@ -384,6 +395,9 @@ bool IsKnownNonDMAOperation(const CallNode *call) {
   if (call->op.same_as(tl::hexagon_hmx_gemm())) {
     booleans = 4;
     arity = 16;
+  } else if (call->op.same_as(tl::hexagon_hmx_gemm_int())) {
+    booleans = 1;
+    arity = 13;
   } else if (call->op.same_as(tl::hexagon_crouton_copy())) {
     booleans = 2;
     arity = 12;
@@ -397,8 +411,9 @@ bool IsKnownNonDMAOperation(const CallNode *call) {
     // The remaining arguments are typed runtime operands; a string here
     // would be emitted as raw expression text by the common C emitter.
     for (int i = booleans; i < arity; ++i) {
-      const bool predicate = arity == 16 && i == 13 && a[i].dtype().is_bool() &&
-                             a[i].dtype().is_scalar();
+      const bool predicate =
+          ((arity == 16 && i == 13) || (arity == 13 && i == 10)) &&
+          a[i].dtype().is_bool() && a[i].dtype().is_scalar();
       if (a[i].as<StringImmNode>() ||
           (!a[i].dtype().is_handle() && !IsIntegerScalar(a[i]) && !predicate))
         return false;
@@ -822,7 +837,8 @@ void CodeGenTileLangHexagon::PrintWorkerLoop(const ForNode *op) {
   // DMA queue. Programs that meet at T.sync_grid run coresident, one per
   // worker.
   std::string extent = PrintExpr(op->extent);
-  bool hmx = UsesHMX(op->body);
+  worker_changes_int_bias_ = false;
+  bool hmx = UsesHMX(op->body, &worker_changes_int_bias_);
   bool grid_sync = UsesGridSync(op->body);
   bool cooperative = false;
   if (auto value = op->annotations.Get(tl::attr::kHexagonCooperative))
@@ -878,6 +894,7 @@ void CodeGenTileLangHexagon::PrintWorkerLoop(const ForNode *op) {
   for (const auto &[var, id] : outer)
     var_idmap_[var] = id;
   in_worker_ = false;
+  worker_changes_int_bias_ = false;
   in_cooperative_ = false;
   worker_program_ = std::nullopt;
   EndScope(scope);
@@ -1091,6 +1108,8 @@ void CodeGenTileLangHexagon::VisitExpr_(const CallNode *op,
       os << separator << PrintExpr(op->args[i]);
       separator = ", ";
     }
+    if (worker_changes_int_bias_ && op->op.same_as(tl::hexagon_hmx_gemm_int()))
+      os << ", true";
     os << ")";
     return;
   }

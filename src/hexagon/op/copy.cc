@@ -157,7 +157,7 @@ std::optional<Stmt> LowerCroutonMove(const CopyNode &op, const LowerArgs &T,
                                      arith::Analyzer *analyzer) {
   const CroutonLayoutNode *src = CroutonOf(op.src, T.layout_map);
   const CroutonLayoutNode *dst = CroutonOf(op.dst, T.layout_map);
-  if (src == nullptr || dst == nullptr ||
+  if (src == nullptr || dst == nullptr || src->bits != 16 || dst->bits != 16 ||
       src->column_tiles != dst->column_tiles ||
       src->transposed != dst->transposed ||
       op.src->dtype != DataType::Float(16) ||
@@ -209,10 +209,13 @@ std::optional<Stmt> LowerCroutonCopy(const CopyNode &op, const LowerArgs &T,
   const Array<Range> &tile_region = pack ? op.dst_range : op.src_range;
   const Buffer &matrix = pack ? op.src : op.dst;
   const Array<Range> &matrix_region = pack ? op.src_range : op.dst_range;
-  if (tiles->dtype != DataType::Float(16) ||
-      (matrix->dtype != DataType::Float(16) &&
-       matrix->dtype != DataType::Float(32)) ||
-      !RowMajor(matrix, T.layout_map))
+  bool fp = crouton->bits == 16 && tiles->dtype == DataType::Float(16) &&
+            (matrix->dtype == DataType::Float(16) ||
+             matrix->dtype == DataType::Float(32));
+  bool bytes =
+      crouton->bits == 8 && tiles->dtype == matrix->dtype &&
+      (tiles->dtype == DataType::Int(8) || tiles->dtype == DataType::UInt(8));
+  if ((!fp && !bytes) || !RowMajor(matrix, T.layout_map))
     return std::nullopt;
   size_t tn = tile_region.size(), mn = matrix_region.size();
   if (tn < 2 || mn < 2)

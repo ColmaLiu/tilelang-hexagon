@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 _in_vtcm = tvm_ffi.get_global_func("tl.hexagon.IsVTCMBuffer")
 _row_major = tvm_ffi.get_global_func("tl.hexagon.RowMajor")
+_hmx_int_rejection = tvm_ffi.get_global_func("tl.hexagon.GemmHMXIntRejection")
 _hmx_rejection = tvm_ffi.get_global_func("tl.hexagon.GemmHMXRejection")
 
 
@@ -208,7 +209,7 @@ class GemmHVX(GemmBase):
         """Why HVX cannot multiply by a B in the Crouton `layout`, or "": B
         the HMX weight operand (transposed as the GEMM is), of whole tiles,
         times an fp16 A [M, K] into a C, both row-major."""
-        if not layout.column_tiles or bool(layout.transposed) != bool(self.trans_B):
+        if layout.bits != 16 or not layout.column_tiles or bool(layout.transposed) != bool(self.trans_B):
             return f"{self.B.name} is in a Crouton layout, not the HMX weight operand's{' (transposed)' if self.trans_B else ''}"
         if str(self.A.dtype) != "float16" or self.trans_A:
             return "HVX multiplies a weight-layout B by an fp16 A [M, K], not transposed"
@@ -264,6 +265,11 @@ class GemmHVX(GemmBase):
 
     def lower(self, layout_map, target, thread_bounds, thread_var, mbar_phase_expr=None):
         if self.integer:
+            if "hexagon.rows" in self.gemm_node.annotations:
+                raise ValueError("integer GEMM does not support hexagon.rows")
+            logger.debug(
+                "T.gemm(%s, %s, %s) runs on HVX, not on HMX: %s", self.A.name, self.B.name, self.C.name, _hmx_int_rejection(self.gemm_node)
+            )
             return self._lower_integer(layout_map)
         layout = layout_map.get(self.B, None)
         if isinstance(layout, CroutonLayout):
