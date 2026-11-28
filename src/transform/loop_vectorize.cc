@@ -35,6 +35,7 @@
 #include "hexagon/target_utils.h"
 #include "support/check.h"
 #include "tir/transforms/ir_utils.h"
+#include <algorithm>
 #include <iostream>
 #include <optional>
 #include <tvm/arith/iter_affine_map.h>
@@ -369,6 +370,33 @@ public:
         if (!info.buffer.defined())
           continue;
         int b = info.buffer->dtype.bits() * info.buffer->dtype.lanes();
+        if (window_loads_ && !info.is_store && (b == 4 || b == 8) &&
+            !info.indices.empty()) {
+          auto strides = GetBufferStrides(info.buffer);
+          PrimExpr offset = 0;
+          for (size_t i = 0; i < info.indices.size(); ++i)
+            offset += info.indices[i] * strides[i];
+          // A half-register of nibbles expands to one full byte register.
+          // Strided byte groups can supply one register of widened words.
+          int width = b == 4 ? 128 : 32;
+          auto w = DetectVectorWindow(offset, inner_for_->loop_var,
+                                      inner_for_->extent, width, analyzer_,
+                                      inner_for_->min, b);
+          if (w && w->kind == VectorWindowKind::kGroups) {
+            b = min_vector_bits / width;
+          } else if (b == 4 &&
+                     std::any_of(buffer_vector_infos_.begin(),
+                                 buffer_vector_infos_.end(),
+                                 [](const auto &access) {
+                                   return access.is_store &&
+                                          access.buffer.defined() &&
+                                          access.buffer->dtype.bits() > 4;
+                                 })) {
+            // Other nibble gathers can read either half of a byte. Keep
+            // the scalar extraction unless the packed window is proven.
+            return 1;
+          }
+        }
         if (b > 0 && (min_bits == 0 || b < min_bits))
           min_bits = b;
       }
@@ -392,7 +420,8 @@ public:
                                    inner_for_->extent, reg_lanes, analyzer_,
                                    /*allow_broadcast=*/true, inner_for_->min,
                                    window_loads_ && !info.is_store,
-                                   TargetHasUnalignedVectorAccess()))
+                                   TargetHasUnalignedVectorAccess(),
+                                   info.buffer->dtype.bits()))
             ok = false;
         }
         vector_size_ = ok ? reg_lanes : 1;
@@ -1171,7 +1200,8 @@ private:
                                 inner_for_->extent, buffer_vec_size, analyzer_,
                                 /*allow_broadcast=*/true, inner_for_->min,
                                 window_loads_ && !is_store,
-                                TargetHasUnalignedVectorAccess())) {
+                                TargetHasUnalignedVectorAccess(),
+                                buffer->dtype.bits())) {
       buffer_vec_size /= 2;
     }
     return {buffer_vec_size, /*requires_scalarization=*/false};
@@ -1393,7 +1423,8 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
 
 std::optional<VectorWindow>
 DetectVectorWindow(const PrimExpr &expr, const Var &var, const PrimExpr &extent,
-                   int width, arith::Analyzer *analyzer, const PrimExpr &min) {
+                   int width, arith::Analyzer *analyzer, const PrimExpr &min,
+                   int window_bits) {
   // At width 2 a window is a ramp or a broadcast.
   if (width < 4 || !analyzer->CanProveEqual(
                        FloorMod(extent, make_const(extent.dtype(), width)), 0))
@@ -1426,6 +1457,21 @@ DetectVectorWindow(const PrimExpr &expr, const Var &var, const PrimExpr &extent,
     if (analyzer->CanProveEqual(offset, FloorDiv(lane_offset, p)))
       return VectorWindow{VectorWindowKind::kRepeat, period};
   }
+  // Four adjacent nibbles of each packed word, or one four-byte word
+  // from each panel register along a logical row.
+  if ((window_bits == 4 || window_bits == 8) && width >= 8 && width <= 128) {
+    PrimExpr four = make_const(offset.dtype(), 4);
+    PrimExpr step = analyzer->Simplify(
+        Substitute(offset, {{lane, make_const(lane.dtype(), 4)}}));
+    const auto *s = step.as<IntImmNode>();
+    if (s && s->value == (window_bits == 4 ? 8 : 128) &&
+        analyzer->CanProveEqual(offset, floordiv(lane_offset, four) * step +
+                                            floormod(lane_offset, four)) &&
+        (window_bits == 8 ||
+         (analyzer->CanProveEqual(floormod(first, 256), floormod(first, 8)) &&
+          analyzer->CanProveEqual(floormod(first, 4), 0))))
+      return VectorWindow{VectorWindowKind::kGroups, 4, s->value};
+  }
   // Two runs, interleaved: lane 1 starts the second, a constant stride on.
   PrimExpr second = analyzer->Simplify(
       Substitute(offset, {{lane, make_const(lane.dtype(), 1)}}));
@@ -1451,7 +1497,7 @@ bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
                          const PrimExpr &extent, int target_vectorized_size,
                          arith::Analyzer *analyzer, bool allow_broadcast,
                          const PrimExpr &min, bool allow_window,
-                         bool allow_unaligned) {
+                         bool allow_unaligned, int window_bits) {
   ICHECK(target_vectorized_size >= 1);
   if (target_vectorized_size == 1) {
     return true;
@@ -1468,8 +1514,9 @@ bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
     return true;
   }
   // A window starts anywhere: it needs no aligned base.
-  if (allow_window && DetectVectorWindow(expr, var, extent,
-                                         target_vectorized_size, analyzer, min))
+  if (allow_window &&
+      DetectVectorWindow(expr, var, extent, target_vectorized_size, analyzer,
+                         min, window_bits))
     return true;
 
   Var ordinal("ordinal", var.dtype());

@@ -533,3 +533,42 @@ TL_DEVICE void tl_hvx_reduce_rows(D *dst, const S *src, int rows, int cols,
                           clear);
   }
 }
+
+// A panel register holds four K bytes per row. vrmpy accumulates them into
+// 32 independent row sums. Paired panels alternate at 32-column boundaries.
+template <typename T>
+TL_DEVICE HVX_Vector tl_panel_sum_accumulate(HVX_Vector sum, HVX_Vector bytes) {
+  if constexpr (std::is_signed_v<T>)
+    return Q6_Vw_vrmpyacc_VwVbVb(sum, bytes, Q6_Vb_vsplat_R(1));
+  else
+    return Q6_Vuw_vrmpyacc_VuwVubRub(sum, bytes, 0x01010101);
+}
+
+template <bool Paired, typename T>
+TL_DEVICE void tl_panel_sum(int32_t *dst, const T *src, int rows, int cols,
+                            bool clear) {
+  for (int panel = 0; panel < rows / 32; ++panel) {
+    int registers = cols / 4;
+    int offset = Paired ? (panel / 2) * (2 * registers) + (panel % 2) * 8
+                        : panel * registers;
+    const auto *v = reinterpret_cast<const HVX_Vector *>(src) + offset;
+    HVX_Vector acc[4] = {clear ? Q6_V_vzero() : tl_hvx_loadu(dst + panel * 32),
+                         Q6_V_vzero(), Q6_V_vzero(), Q6_V_vzero()};
+    // Eight consecutive registers form one 32-column tile. Separate the
+    // accumulator chains and skip the other panel's tile in paired storage.
+    int block = 0;
+    for (; block + 8 <= registers; block += 8) {
+#pragma clang loop unroll(full)
+      for (int j = 0; j < 8; ++j)
+        acc[j % 4] = tl_panel_sum_accumulate<T>(
+            acc[j % 4], v[(Paired ? 2 * block : block) + j]);
+    }
+    if constexpr (!Paired) {
+      for (; block < registers; ++block)
+        acc[0] = tl_panel_sum_accumulate<T>(acc[0], v[block]);
+    }
+    HVX_Vector sum = Q6_Vw_vadd_VwVw(Q6_Vw_vadd_VwVw(acc[0], acc[1]),
+                                     Q6_Vw_vadd_VwVw(acc[2], acc[3]));
+    tl_hvx_storeu(dst + panel * 32, sum);
+  }
+}

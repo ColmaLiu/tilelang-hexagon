@@ -193,25 +193,135 @@ TL_DEVICE vec_type<T, N> tl_hvx_load_replicate(const T *p) {
   return out;
 }
 
-// An N-lane vector (at most two registers) of the N / K elements at p, each
+// An N-lane vector of the N / K elements at p, each
 // repeated K times: lane l is p[l / K]. Shuffling a register with itself
 // repeats each of its chunks twice, so log2(K) shuffles repeat each element
 // K times.
 template <int K, int N, bool Aligned, typename T>
 TL_DEVICE vec_type<T, N> tl_hvx_load_repeat(const T *p) {
   constexpr int B = static_cast<int>(sizeof(T));
-  static_assert(K >= 2 && (K & (K - 1)) == 0 && N % K == 0 && N * B <= 256,
-                "K a power of two, two registers at most");
+  static_assert(K >= 2 && (K & (K - 1)) == 0 && N % K == 0 &&
+                    (N * B <= 256 || (N * B == 512 && K == 4)),
+                "the repeated window must fit its register shuffles");
   HVX_Vector v = tl_hvx_load_window<N / K * B, Aligned>(p);
-  HVX_VectorPair w;
+  if constexpr (N * B == 512) {
+    HVX_VectorPair twice = Q6_W_vshuff_VVR(v, v, -B);
+    HVX_Vector low = Q6_V_lo_W(twice), high = Q6_V_hi_W(twice);
+    HVX_VectorPair parts[2] = {Q6_W_vshuff_VVR(low, low, -2 * B),
+                               Q6_W_vshuff_VVR(high, high, -2 * B)};
+    vec_type<T, N> out;
+    __builtin_memcpy(&out, parts, sizeof(out));
+    return out;
+  } else {
+    HVX_VectorPair w;
 #pragma clang loop unroll(full)
-  for (int chunk = B; chunk < K * B; chunk *= 2) {
-    w = Q6_W_vshuff_VVR(v, v, -chunk);
-    v = Q6_V_lo_W(w);
+    for (int chunk = B; chunk < K * B; chunk *= 2) {
+      w = Q6_W_vshuff_VVR(v, v, -chunk);
+      v = Q6_V_lo_W(w);
+    }
+    vec_type<T, N> out;
+    __builtin_memcpy(&out, &w, N * B);
+    return out;
+  }
+}
+
+// Scalar reads also handle the high nibble of an odd logical index.
+template <typename T, typename Index>
+TL_DEVICE T tl_load_nibble(const T *data, Index i) {
+  int n = (static_cast<uint8_t>(data[i / 2]) >> (4 * (i & 1))) & 15;
+  if constexpr (std::is_signed_v<T>)
+    n = (n ^ 8) - 8;
+  return static_cast<T>(n);
+}
+
+template <int N, typename T>
+TL_DEVICE vec_type<T, N> tl_hvx_unpack4(const vec_type<T, N / 2> &packed) {
+  HVX_Vector x = Q6_V_vzero();
+  __builtin_memcpy(&x, &packed, N / 2);
+  HVX_Vector mask = Q6_Vb_vsplat_R(15);
+  HVX_Vector lo = Q6_V_vand_VV(x, mask);
+  HVX_Vector hi = Q6_V_vand_VV(Q6_Vuh_vlsr_VuhR(x, 4), mask);
+  HVX_VectorPair halves = Q6_W_vshuff_VVR(hi, lo, -1);
+  if constexpr (std::is_signed_v<T>) {
+    HVX_Vector sign = Q6_Vb_vsplat_R(8);
+    auto extend = [&](HVX_Vector v) {
+      return Q6_Vb_vsub_VbVb(Q6_V_vxor_VV(v, sign), sign);
+    };
+    halves =
+        Q6_W_vcombine_VV(extend(Q6_V_hi_W(halves)), extend(Q6_V_lo_W(halves)));
   }
   vec_type<T, N> out;
-  __builtin_memcpy(&out, &w, N * B);
+  __builtin_memcpy(&out, &halves, N);
   return out;
+}
+
+// Each word of a panel register holds eight nibbles from one row. Look up
+// their signed or unsigned halfword values once for two adjacent windows.
+// The byte parity selects the two lookup registers. The halfword parity
+// selects the first or second group of four columns in each row.
+template <typename T>
+TL_DEVICE vec_type<int16_t, 128> tl_hvx_load_widened_nibbles(const T *base,
+                                                             int high) {
+  struct Table {
+    int16_t values[64]{};
+    constexpr Table() {
+      for (int i = 0; i < 64; ++i) {
+        int code = (i / 2) & 15;
+        values[i] = std::is_signed_v<T> ? (code ^ 8) - 8 : code;
+      }
+    }
+  };
+  alignas(128) static constexpr Table table{};
+  HVX_Vector lut = *reinterpret_cast<const HVX_Vector *>(&table);
+  HVX_Vector x = *reinterpret_cast<const HVX_Vector *>(base);
+  HVX_VectorPair lo = Q6_Wh_vlut16_VbVhR_nomatch(x, lut, 0);
+  HVX_VectorPair hi =
+      Q6_Wh_vlut16_VbVhR_nomatch(Q6_Vuh_vlsr_VuhR(x, 4), lut, 0);
+  HVX_Vector a, b;
+  if (high) {
+    a = Q6_Vh_vshuffo_VhVh(Q6_V_lo_W(hi), Q6_V_lo_W(lo));
+    b = Q6_Vh_vshuffo_VhVh(Q6_V_hi_W(hi), Q6_V_hi_W(lo));
+  } else {
+    a = Q6_Vh_vshuffe_VhVh(Q6_V_lo_W(hi), Q6_V_lo_W(lo));
+    b = Q6_Vh_vshuffe_VhVh(Q6_V_hi_W(hi), Q6_V_hi_W(lo));
+  }
+  HVX_VectorPair ordered = Q6_W_vshuff_VVR(b, a, -4);
+  vec_type<int16_t, 128> out;
+  __builtin_memcpy(&out, &ordered, sizeof(out));
+  return out;
+}
+
+template <typename Byte, typename Halfword>
+TL_DEVICE vec_type<Byte, 128>
+tl_hvx_high_bytes(const vec_type<Halfword, 128> &x) {
+  static_assert(sizeof(Byte) == 1 && sizeof(Halfword) == 2);
+  HVX_VectorPair pair;
+  __builtin_memcpy(&pair, &x, sizeof(pair));
+  HVX_Vector packed = Q6_Vb_vpacko_VhVh(Q6_V_hi_W(pair), Q6_V_lo_W(pair));
+  vec_type<Byte, 128> out;
+  __builtin_memcpy(&out, &packed, sizeof(out));
+  return out;
+}
+
+// Four consecutive elements per group. Nibbles occupy one half of each
+// 32-bit lane. A byte-panel row instead supplies a word from each register.
+template <int Bits, int N, typename T>
+TL_DEVICE auto tl_hvx_load_groups(const T *p) {
+  if constexpr (Bits == 4) {
+    int high = reinterpret_cast<uintptr_t>(p) & 2;
+    HVX_Vector v = tl_hvx_load_window<N, true>(p - high);
+    v = Q6_Vuw_vlsr_VuwR(v, high * 8);
+    HVX_Vector halves = Q6_Vh_vpacke_VwVw(v, v);
+    vec_type<T, N / 2> packed;
+    __builtin_memcpy(&packed, &halves, N / 2);
+    return packed;
+  } else {
+    vec_type<T, N> out;
+#pragma clang loop unroll(full)
+    for (int i = 0; i < N / 4; ++i)
+      __builtin_memcpy(reinterpret_cast<char *>(&out) + i * 4, p + i * 128, 4);
+    return out;
+  }
 }
 
 // An N-lane vector (at most two registers) of two runs of N / 2 elements, at

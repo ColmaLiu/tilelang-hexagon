@@ -58,23 +58,28 @@ bool IsMathFunction(const CallNode *call) {
   return false;
 }
 
-// One iteration of a heavy map: no loop, one vector stored, and an HVX math
-// function or a float division of vectors on the way.
-bool IsHeavyMapIteration(const Stmt &body) {
+// Schedule independent operations across register stores. Adjacent byte
+// vectors consume alternate halves of the same nibble-panel register.
+int MapUnrollCount(const Stmt &body) {
   int stores = 0;
-  bool loop = false, heavy = false;
+  bool loop = false, heavy = false, nibble_pairs = false;
   PostOrderVisit(body, [&](const ObjectRef &node) {
     if (node.as<ForNode>()) {
       loop = true;
     } else if (const auto *store = node.as<BufferStoreNode>()) {
       stores += store->value.dtype().lanes() > 1;
     } else if (const auto *call = node.as<CallNode>()) {
+      nibble_pairs |= call->op.same_as(hexagon_load_widened_nibbles());
       heavy |= call->dtype.lanes() > 1 && IsMathFunction(call);
     } else if (const auto *div = node.as<DivNode>()) {
       heavy |= div->dtype.lanes() > 1 && div->dtype.is_float();
     }
   });
-  return !loop && stores == 1 && heavy;
+  if (loop || stores != 1)
+    return 0;
+  if (nibble_pairs)
+    return 8;
+  return heavy ? 2 : 0;
 }
 
 struct ArenaSlice {
@@ -413,9 +418,9 @@ private:
       if (native_registers_ && !in_volatile_scope_ && loop->annotations.empty())
         group = GroupedDivOperands(loop, parameters_);
     }
-    if (IsHeavyMapIteration(loop->body)) {
+    if (int count = MapUnrollCount(loop->body)) {
       loop.CopyOnWrite()->annotations.Set(attr::kHexagonUnrollCount,
-                                          Integer(2));
+                                          Integer(count));
     } else if (simple_maps_ && loop->annotations.empty() &&
                SimpleHalfMap(loop, slices_).Matches()) {
       loop.CopyOnWrite()->annotations.Set(

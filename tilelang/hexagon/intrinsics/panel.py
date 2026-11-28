@@ -100,7 +100,7 @@ def unpack_panel(packed: torch.Tensor, shape: Sequence[int], bits: int, signed: 
         _check_paired(rows, cols, bits)
         packed = packed.reshape(*lead, rows // 64, cols // 32, 2, 1024).transpose(-3, -2)
     lane = 32 // bits
-    v = packed.reshape(-1).to(torch.int64)
+    v = packed.reshape(-1).to(torch.uint8).to(torch.int64)
     if bits == 4:
         v = torch.stack([v & 0xF, v >> 4], dim=-1).reshape(-1)
     if signed:

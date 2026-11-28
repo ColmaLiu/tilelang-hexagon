@@ -114,7 +114,7 @@ bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
                          const PrimExpr &extent, int target_vectorized_size,
                          arith::Analyzer *analyzer, bool allow_broadcast = true,
                          const PrimExpr &min = 0, bool allow_window = false,
-                         bool allow_unaligned = false);
+                         bool allow_unaligned = false, int window_bits = 0);
 
 /*!
  * \brief Whether the current target's vector loads and stores take any address
@@ -136,7 +136,7 @@ bool TargetHasUnalignedVectorAccess();
  * lanes declare the `vector_window_loads` attribute; for them,
  * IndicesCanVectorize accepts such loads with allow_window.
  */
-enum class VectorWindowKind { kReplicate, kRepeat, kInterleave };
+enum class VectorWindowKind { kReplicate, kRepeat, kInterleave, kGroups };
 struct VectorWindow {
   VectorWindowKind kind;
   int period;
@@ -145,7 +145,7 @@ struct VectorWindow {
 std::optional<VectorWindow>
 DetectVectorWindow(const PrimExpr &expr, const Var &var, const PrimExpr &extent,
                    int width, arith::Analyzer *analyzer,
-                   const PrimExpr &min = 0);
+                   const PrimExpr &min = 0, int window_bits = 0);
 
 } // namespace tl
 } // namespace tvm

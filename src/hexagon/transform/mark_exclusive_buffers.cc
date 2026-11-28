@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace tvm {
@@ -43,24 +44,28 @@ struct Slice {
   int64_t bytes = -1; // unknown
 };
 
-// The bytes of `buffer`, or -1 when its shape is not constant.
-int64_t Bytes(const Buffer &buffer) {
-  int64_t elements = 1;
-  for (const PrimExpr &dim : buffer->shape) {
-    const auto *n = dim.as<IntImmNode>();
-    if (!n)
-      return -1;
-    elements *= n->value;
-  }
-  return elements * buffer->dtype.bytes();
-}
-
 // The arena slices of a function, and the bytes each one's accesses reach:
 // buffer views (declared, loaded or stored) and tvm_access_ptr ranges, bounded
 // under the enclosing loops.
 class SliceCollector : public arith::IRVisitorWithAnalyzer {
 public:
   std::unordered_map<const VarNode *, Slice> slices;
+
+  // For widened nibble windows the compiler proves the physical reads are
+  // register aligned and wholly inside the packed array. Keep the existing
+  // conservative extent for opaque 4-bit kernel operands.
+  explicit SliceCollector(const Stmt &body) {
+    PostOrderVisit(body, [&](const ObjectRef &node) {
+      const auto *call = node.as<CallNode>();
+      if (!call || !call->op.same_as(hexagon_load_widened_nibbles()))
+        return;
+      const auto *address = call->args[0].as<CallNode>();
+      if (address && address->op.same_as(builtin::address_of())) {
+        if (const auto *load = address->args[0].as<BufferLoadNode>())
+          packed_.insert(load->buffer->data.get());
+      }
+    });
+  }
 
   void Finish() {
     for (auto &[var, slice] : slices) {
@@ -104,14 +109,30 @@ private:
             analyzer_.const_int_bound(op->args[2] + op->args[3])->max_value;
         Reach(data, end == arith::ConstIntBound::kPosInf
                         ? -1
-                        : end * op->args[0].dtype().bytes());
+                        : StorageBytes(data, op->args[0].dtype(), end));
       }
     }
     IRVisitorWithAnalyzer::VisitExpr_(op);
   }
 
+  int64_t StorageBytes(const VarNode *data, DataType dtype,
+                       int64_t elements) const {
+    if (dtype.is_scalar() && dtype.bits() == 4 && packed_.count(data))
+      return elements / 2 + elements % 2;
+    return elements * dtype.bytes();
+  }
+
   void View(const Buffer &buffer) {
-    int64_t bytes = Bytes(buffer);
+    int64_t elements = 1;
+    for (const PrimExpr &dim : buffer->shape) {
+      const auto *n = dim.as<IntImmNode>();
+      if (!n) {
+        Reach(buffer->data.get(), -1);
+        return;
+      }
+      elements *= n->value;
+    }
+    int64_t bytes = StorageBytes(buffer->data.get(), buffer->dtype, elements);
     if (!buffer->strides.empty() || !is_zero(buffer->elem_offset))
       bytes = -1;
     Reach(buffer->data.get(), bytes);
@@ -123,6 +144,7 @@ private:
       it->second = bytes < 0 ? -1 : std::max(it->second, bytes);
   }
 
+  std::unordered_set<const VarNode *> packed_;
   std::unordered_map<const VarNode *, int64_t> reach_;
 };
 
@@ -170,7 +192,7 @@ namespace transform {
 tvm::transform::Pass MarkExclusiveBuffers() {
   auto pass_func = [](PrimFunc func, const IRModule &,
                       const tvm::transform::PassContext &) -> PrimFunc {
-    SliceCollector collector;
+    SliceCollector collector(func->body);
     collector(func->body);
     collector.Finish();
     func.CopyOnWrite()->body = ExclusiveMarker(collector.slices)(func->body);

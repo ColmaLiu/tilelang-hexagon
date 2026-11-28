@@ -30,6 +30,7 @@
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
+#include "hexagon/layout/panel.h"
 
 #include "../op/reducer.h"
 #include "arith/ir_mutator_with_analyzer.h"
@@ -155,9 +156,19 @@ static Optional<Fragment> PhysicalOrderLoopLayout(const For &root,
           vars, layout->Forward(store->indices), thread_bounds, analyzer);
       return;
     }
-    Fragment candidate = Fragment(vars, layout->Forward(store->indices),
-                                  make_zero(DataType::Int(32)), IterVar())
-                             ->BindThreadRange(thread_bounds);
+    auto physical = layout->Forward(store->indices);
+    // A byte panel register has two physical axes (32 rows, four bytes).
+    // Keep the storage axes but schedule their product as one vector loop.
+    if (region_order && store->buffer->dtype.bits() == 8 &&
+        layout.as<PanelLayoutNode>()) {
+      size_t last = physical.size() - 1;
+      PrimExpr lane = physical[last - 1] * 4 + physical[last];
+      physical.pop_back();
+      physical.Set(last - 1, lane);
+    }
+    Fragment candidate =
+        Fragment(vars, physical, make_zero(DataType::Int(32)), IterVar())
+            ->BindThreadRange(thread_bounds);
     if (candidate->DetectInjective(false)->errors.empty())
       result = candidate;
   });

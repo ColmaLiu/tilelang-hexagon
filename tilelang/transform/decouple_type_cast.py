@@ -355,8 +355,20 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
     cache buffers as intermediate stages.
     """
 
-    def __init__(self):
+    def __init__(self, func: PrimFunc):
         super().__init__()
+        target = func.attrs.get("target") if func.attrs else None
+        self.packed_windows = target is not None and target.attrs.get("vector_window_loads", False)
+        self.min_vector_bits = int(target.attrs.get("min_vector_bits", 0)) if self.packed_windows else 0
+        self.byte_panels = set()
+        if self.packed_windows and isinstance(func.body, SBlockRealize):
+            from tilelang.hexagon.intrinsics.panel import PanelLayout
+
+            # LowerTileOp keys the function-wide layout map by remapped Buffer.
+            layouts = func.body.block.annotations.get("layout_map", {})
+            self.byte_panels = {
+                buf for buf, layout in layouts.items() if buf.dtype in ("int8", "uint8") and isinstance(layout, PanelLayout)
+            }
         self._var_counter = 0
 
     def _make_unique_name(self, base: str) -> str:
@@ -417,6 +429,16 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         # Collect all shared/global stores and loads
         collector = MemoryAccessCollector(op.loop_var)
         collector.visit_stmt(normalized_body)
+
+        # Two nibbles share a byte. Staging each into an int4 temporary would
+        # require sub-byte stores, so keep the load with its unpacking cast.
+        # A byte panel can widen a short window directly in registers. Its
+        # staging copy alone would be narrower than the target minimum.
+        if self.packed_windows and any(
+            ld.buffer.dtype in ("int4", "uint4") or (ld.buffer in self.byte_panels and op.extent.value * 8 < self.min_vector_bits)
+            for ld in collector.loads
+        ):
+            return op
 
         if not collector.stores and not collector.loads:
             # Cast exists but no memory access → nothing to decouple
@@ -648,7 +670,7 @@ def DecoupleTypeCast():
     """
 
     def pass_fn(func: PrimFunc, mod, ctx) -> PrimFunc:
-        mutator = DecoupleTypeCastMutator()
+        mutator = DecoupleTypeCastMutator(func)
         new_body = mutator.visit_stmt(func.body)
         return func.with_body(new_body, span=func.span)
 
