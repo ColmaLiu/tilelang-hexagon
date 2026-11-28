@@ -6,6 +6,9 @@
 // vocabulary the codegen emits.  HMX/HVX/VTCM helpers (which pull in SDK and
 // intrinsic headers) live in sibling headers included on demand by kernels that
 // use those features.
+#ifdef __HVX__
+#include <hexagon_types.h>
+#endif
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -237,7 +240,27 @@ template <typename T, int N> struct __attribute__((may_alias)) vec_type {
   }
   TL_VEC_BINOP(+)
   TL_VEC_BINOP(-)
-  TL_VEC_BINOP(*)
+  TL_HEXAGON_VECTOR_INLINE vec_type operator*(const vec_type &o) const {
+#if defined(__HVX__) && __HVX_LENGTH__ == 128
+    // Lane-wise 16-bit products retain the low half. The native vector
+    // operator widens to words and shuffles the halves back into order.
+    if constexpr (std::is_integral_v<T> && sizeof(T) == 2 && N % 64 == 0) {
+      vec_type out;
+#pragma clang loop unroll(full)
+      for (int i = 0; i < N / 64; ++i) {
+        HVX_Vector a, b;
+        __builtin_memcpy(&a, reinterpret_cast<const char *>(&v) + i * 128, 128);
+        __builtin_memcpy(&b, reinterpret_cast<const char *>(&o.v) + i * 128,
+                         128);
+        HVX_Vector product = Q6_Vh_vmpyi_VhVh(a, b);
+        __builtin_memcpy(reinterpret_cast<char *>(&out.v) + i * 128, &product,
+                         128);
+      }
+      return out;
+    }
+#endif
+    return vec_type(v * o.v);
+  }
   TL_VEC_BINOP(/)
   TL_VEC_BINOP(%)
   TL_VEC_BINOP(&)

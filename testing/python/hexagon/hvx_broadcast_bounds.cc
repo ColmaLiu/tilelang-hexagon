@@ -6,6 +6,8 @@
 #include <string.h>
 
 #ifdef TL_LANES_HOST_TEST
+#include <type_traits>
+
 struct alignas(128) HVX_Vector {
   uint8_t bytes[128];
 };
@@ -43,6 +45,19 @@ void Q6_vmem_QRIV(HVX_VectorPred, HVX_Vector *, HVX_Vector);
 HVX_Vector Q6_V_vzero();
 HVX_VectorPair Q6_W_vshuff_VVR(HVX_Vector, HVX_Vector, int);
 HVX_Vector Q6_V_lo_W(HVX_VectorPair);
+HVX_Vector Q6_V_hi_W(HVX_VectorPair);
+HVX_Vector Q6_Vb_vsplat_R(int);
+HVX_Vector Q6_V_vand_VV(HVX_Vector, HVX_Vector);
+HVX_Vector Q6_V_vxor_VV(HVX_Vector, HVX_Vector);
+HVX_Vector Q6_Vuh_vlsr_VuhR(HVX_Vector, int);
+HVX_Vector Q6_Vuw_vlsr_VuwR(HVX_Vector, int);
+HVX_Vector Q6_Vb_vsub_VbVb(HVX_Vector, HVX_Vector);
+HVX_VectorPair Q6_Wh_vlut16_VbVhR_nomatch(HVX_Vector, HVX_Vector, int);
+HVX_Vector Q6_Vh_vshuffe_VhVh(HVX_Vector, HVX_Vector);
+HVX_Vector Q6_Vh_vshuffo_VhVh(HVX_Vector, HVX_Vector);
+HVX_Vector Q6_Vb_vpacko_VhVh(HVX_Vector, HVX_Vector);
+HVX_Vector Q6_Vh_vpacke_VwVw(HVX_Vector, HVX_Vector);
+HVX_VectorPair Q6_W_vcombine_VV(HVX_Vector, HVX_Vector);
 #endif
 
 #include <tl_templates/hexagon/hvx_lanes.h>

@@ -77,6 +77,7 @@ def test_pack_panel_round_trips(bits, signed):
     packed = pack_panel(values, bits)
     assert packed.dtype == torch.uint8 and packed.numel() == values.numel() * bits // 8
     torch.testing.assert_close(unpack_panel(packed, values.shape, bits, signed), values)
+    torch.testing.assert_close(unpack_panel(packed.view(torch.int8), values.shape, bits, signed), values)
 
 
 def test_pack_panel_puts_a_lane_in_a_word():

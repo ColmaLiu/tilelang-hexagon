@@ -146,6 +146,10 @@ TVM_DLL const Op &hexagon_broadcast_lane();
 TVM_DLL const Op &hexagon_load_replicate();
 // tl_hvx_load_repeat<period, lanes, aligned>(ptr): lane l is ptr[l / period].
 TVM_DLL const Op &hexagon_load_repeat();
+TVM_DLL const Op &hexagon_load_groups();
+TVM_DLL const Op &hexagon_load_widened_nibbles();
+TVM_DLL const Op &hexagon_high_bytes();
+TVM_DLL const Op &hexagon_panel_sum();
 // tl_hvx_load_interleave<2, lanes, aligned>(ptr, stride): lane l is
 // ptr[(l % 2) * stride + l / 2], two runs interleaved; aligned: both runs.
 TVM_DLL const Op &hexagon_load_interleave();

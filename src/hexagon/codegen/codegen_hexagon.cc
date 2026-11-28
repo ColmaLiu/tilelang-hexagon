@@ -76,6 +76,14 @@ const HexagonBuiltin *FindHexagonBuiltin(const CallNode *call) {
       {tl::hexagon_tanh(), "tl_hvx_tanh", "hvx_math.h", false},
       {tl::hexagon_sigmoid(), "tl_hvx_sigmoid", "hvx_math.h", false},
       {tl::hexagon_erf(), "tl_hvx_erf", "hvx_math.h", false},
+      {tl::hexagon_load_groups(), "tl_hvx_load_groups", "hvx_lanes.h", false,
+       false, false, -1, 2},
+      {tl::hexagon_load_widened_nibbles(), "tl_hvx_load_widened_nibbles",
+       "hvx_lanes.h", false},
+      {tl::hexagon_high_bytes(), "tl_hvx_high_bytes", "hvx_lanes.h", false,
+       false, false, -1, 1},
+      {tl::hexagon_panel_sum(), "tl_panel_sum", "hvx_reduce.h", false, false,
+       false, -1, 1},
       {tl::hexagon_fabs(), "tl_hvx_fabs", "hvx_math.h", false},
       {tl::hexagon_exp_fast(), "tl_hvx_exp_fast", "hvx_math.h", false},
       {tl::hexagon_exp2_fast(), "tl_hvx_exp2_fast", "hvx_math.h", false},
@@ -1004,6 +1012,19 @@ void CodeGenTileLangHexagon::VisitStmt_(const BindNode *op) {
   }
 }
 
+void CodeGenTileLangHexagon::VisitExpr_(const CastNode *op, std::ostream &os) {
+  DataType from = op->value.dtype();
+  if (from.bits() == 4 && from.lanes() > 1 && op->dtype.bits() >= 8) {
+    headers_.insert("hvx_lanes.h");
+    os << "((";
+    PrintType(op->dtype, os);
+    os << ")tl_hvx_unpack4<" << from.lanes() << ">(" << PrintExpr(op->value)
+       << "))";
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
 void CodeGenTileLangHexagon::VisitExpr_(const FloatImmNode *op,
                                         std::ostream &os) { // NOLINT(*)
   if (op->dtype == DataType::Float(32) && std::isfinite(op->value)) {
@@ -1257,10 +1278,15 @@ std::string CodeGenTileLangHexagon::SubByteAddress(const BufferNode *buffer,
 
 void CodeGenTileLangHexagon::VisitExpr_(const BufferLoadNode *op,
                                         std::ostream &os) { // NOLINT(*)
-  ICHECK(op->buffer->dtype.bits() != 4 || op->dtype.lanes() > 1)
-      << "Hexagon reads 4-bit buffer `" << op->buffer->name
-      << "` by whole registers: copy it with T.copy and multiply it with "
-         "T.gemm, element by element it is not addressable";
+  if (op->buffer->dtype.bits() == 4 && op->dtype.is_scalar()) {
+    ICHECK_EQ(op->indices.size(), 1U);
+    os << "tl_load_nibble((const ";
+    PrintType(op->buffer->dtype, os);
+    os << "*)" << GetVarID(op->buffer->data.get()) << ", "
+       << PrintExpr(op->indices[0]) << ")";
+    headers_.insert("hvx_lanes.h");
+    return;
+  }
   arith::PVar<PrimExpr> base;
   if (op->dtype.lanes() != op->buffer->dtype.lanes() &&
       !op->predicate.defined() && op->indices.size() == 1 &&

@@ -109,6 +109,26 @@ TIR_DEFINE_TL_BUILTIN(hexagon_load_repeat)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kReadState));
 
+TIR_DEFINE_TL_BUILTIN(hexagon_load_groups)
+    .set_num_inputs(3)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kReadState));
+
+TIR_DEFINE_TL_BUILTIN(hexagon_load_widened_nibbles)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kReadState));
+
+TIR_DEFINE_TL_BUILTIN(hexagon_high_bytes)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(hexagon_panel_sum)
+    .set_num_inputs(6)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(hexagon_load_interleave)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",

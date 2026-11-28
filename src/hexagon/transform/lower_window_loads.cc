@@ -85,8 +85,8 @@ struct Window {
 // The window a vector index reads: every lane's offset from lane 0 is a
 // constant, l % period (replicate), l / period (repeat), or
 // (l % 2) * stride + l / 2 (interleave).
-std::optional<Window> WindowOf(const PrimExpr &index,
-                               arith::Analyzer *analyzer) {
+std::optional<Window> WindowOf(const PrimExpr &index, arith::Analyzer *analyzer,
+                               int bits) {
   int lanes = index.dtype().lanes();
   std::vector<int64_t> offsets(lanes);
   PrimExpr first;
@@ -116,6 +116,17 @@ std::optional<Window> WindowOf(const PrimExpr &index,
     if (repeat)
       return Window{&hexagon_load_repeat(), period, first};
   }
+  if ((bits == 4 || bits == 8) && lanes >= 8 && lanes <= 128) {
+    int stride = bits == 4 ? 8 : 128;
+    bool groups = true;
+    for (int l = 0; l < lanes; ++l)
+      groups &= offsets[l] == l / 4 * stride + l % 4;
+    if (groups &&
+        (bits == 8 ||
+         (analyzer->CanProveEqual(floormod(first, 256), floormod(first, 8)) &&
+          analyzer->CanProveEqual(floormod(first, 4), 0))))
+      return Window{&hexagon_load_groups(), 4, first, stride};
+  }
   bool interleave = lanes > 2 && offsets[1] > 0;
   for (int l = 0; interleave && l < lanes; ++l)
     interleave = offsets[l] == l % 2 * offsets[1] + l / 2;
@@ -126,16 +137,55 @@ std::optional<Window> WindowOf(const PrimExpr &index,
 
 class WindowLoadLowerer : public StmtExprMutator {
 private:
+  PrimExpr VisitExpr_(const CastNode *op) final {
+    // Packing the high bytes implements a narrowing cast of a halfword
+    // shifted right by eight, for either signedness and any input expression.
+    if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8 &&
+        op->dtype.lanes() == 128 && op->value.dtype().bits() == 16) {
+      const auto *shift = op->value.as<CallNode>();
+      if (shift && shift->op.same_as(builtin::shift_right())) {
+        const auto *amount = shift->args[1].as<BroadcastNode>();
+        if (is_const_int(amount ? amount->value : shift->args[1], 8))
+          return Call(op->dtype, hexagon_high_bytes(),
+                      {TypeAnnotation(op->dtype.element_of()),
+                       VisitExpr(shift->args[0])});
+      }
+    }
+    const auto *load = op->value.as<BufferLoadNode>();
+    if (load && load->dtype.bits() == 4 && load->dtype.lanes() == 128 &&
+        op->dtype.bits() >= 8 && !load->predicate &&
+        load->indices.size() == 1 && !load->indices[0].as<RampNode>()) {
+      auto window = WindowOf(load->indices[0], &analyzer_, 4);
+      if (window && window->op == &hexagon_load_groups()) {
+        // One aligned register contains two four-nibble windows for each row.
+        // Keep the selector separate so adjacent iterations share the lookup.
+        PrimExpr first = window->first;
+        PrimExpr base = analyzer_.Simplify(floordiv(first, 256) * 256);
+        PrimExpr high = analyzer_.Simplify(floordiv(floormod(first, 8), 4));
+        PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
+                            {BufferLoad(load->buffer, {base})});
+        return cast(op->dtype,
+                    Call(DataType::Int(16, 128), hexagon_load_widened_nibbles(),
+                         {ptr, high}));
+      }
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     PrimExpr expr = StmtExprMutator::VisitExpr_(op);
     const auto *load = expr.as<BufferLoadNode>();
     int lanes = load->dtype.lanes();
-    if (lanes == 1 || load->indices.size() != 1 ||
-        load->indices[0].as<RampNode>() ||
-        load->dtype.bytes() > 2 * kRegisterBytes)
+    int bytes = (load->dtype.bits() * lanes + 7) / 8;
+    if (lanes == 1 || load->predicate || load->indices.size() != 1 ||
+        load->indices[0].as<RampNode>() || bytes > 4 * kRegisterBytes)
       return expr;
-    std::optional<Window> window = WindowOf(load->indices[0], &analyzer_);
-    if (!window)
+    std::optional<Window> window =
+        WindowOf(load->indices[0], &analyzer_, load->buffer->dtype.bits());
+    if (!window ||
+        (bytes > 2 * kRegisterBytes &&
+         !(bytes == 4 * kRegisterBytes &&
+           window->op == &hexagon_load_repeat() && window->period == 4)))
       return expr;
     // A window, or a run, that starts on a multiple of its size lies in one
     // aligned block (buffers start on whole registers).
@@ -147,6 +197,9 @@ private:
                    window->stride % elements == 0;
     PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
                         {BufferLoad(load->buffer, {window->first})});
+    if (window->op == &hexagon_load_groups())
+      return Call(load->dtype, *window->op,
+                  {Integer(load->buffer->dtype.bits()), Integer(lanes), ptr});
     Array<PrimExpr> args = {StringImm(std::to_string(window->period)),
                             StringImm(std::to_string(lanes)),
                             StringImm(aligned ? "true" : "false"), ptr};

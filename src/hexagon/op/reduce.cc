@@ -22,6 +22,7 @@
 #include "backend/common/op/reduce.h"
 #include "backend/common/target_utils.h"
 #include "hexagon/layout/crouton.h"
+#include "hexagon/layout/panel.h"
 #include "hexagon/op/builtin.h"
 #include "hexagon/op/utils.h"
 #include "layout/layout.h"
@@ -127,6 +128,10 @@ public:
   Stmt Lower(arith::Analyzer *analyzer) {
     for (int d = 0; d < ndim_; ++d)
       vars_.emplace_back("i" + std::to_string(d), DataType::Int(32));
+    if (auto layout = layout_map_.Get(op_.src)) {
+      if (const auto *panel = layout.value().as<PanelLayoutNode>())
+        return PanelSum(*panel, analyzer);
+    }
     if (auto crouton = CroutonReduce())
       return *crouton;
     if (Innermost()) {
@@ -217,6 +222,31 @@ private:
     for (int d = first_axis - 1; d >= 0; --d)
       body = Loop(vars_[d], Extent(d), ForKind::kSerial, body);
     return body;
+  }
+
+  Stmt PanelSum(const PanelLayoutNode &panel, arith::Analyzer *analyzer) const {
+    ICHECK(ndim_ == 2 && op_.dim == 1 && op_.type->IsSum() && panel.lane == 4 &&
+           (src_t_ == DataType::Int(8) || src_t_ == DataType::UInt(8)) &&
+           dst_t_ == DataType::Int(32) && RowMajor(op_.dst, layout_map_) &&
+           analyzer->CanProveEqual(Stride(op_.dst, 0), 1))
+        << "Hexagon panel reduction supports a whole 8-bit matrix summed along "
+           "K into contiguous int32 rows";
+    for (int d = 0; d < ndim_; ++d) {
+      auto r = op_.srcRegion_->region[d];
+      ICHECK(is_zero(r->min) &&
+             analyzer->CanProveEqual(r->extent, op_.src->shape[d]))
+          << "Hexagon panel sum requires a whole source matrix";
+    }
+    PrimExpr zero = Integer(0);
+    auto address = [](Buffer b, Array<PrimExpr> at) {
+      return Call(DataType::Handle(), builtin::address_of(),
+                  {BufferLoad(b, at)});
+    };
+    return Evaluate(
+        Call(DataType::Void(), hexagon_panel_sum(),
+             {Bool(panel.paired), address(op_.dst, Output({{0, zero}})),
+              address(op_.src, {zero, zero}), Integer(panel.Rows()),
+              Integer(panel.Cols()), Bool(op_.clear)}));
   }
 
   // A whole Crouton matrix reduced along its rows or its columns into a
